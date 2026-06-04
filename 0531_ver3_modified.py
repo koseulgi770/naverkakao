@@ -15885,6 +15885,7 @@ class MultiPlatformPage(QWidget):
             result_edit = QTextEdit()
             result_edit.setPlaceholderText(f"{label} 변환 결과가 여기에 표시됩니다...")
             result_edit.setStyleSheet("background:#111; color:#e0e0e0; font-size:12px; border:none;")
+            result_edit.textChanged.connect(lambda k=key, e=result_edit: self._on_result_edited(k, e))
             tab_l.addWidget(result_edit, 1)
             copy_row = QHBoxLayout()
             cp = QPushButton("📋 복사")
@@ -16946,69 +16947,48 @@ class MultiPlatformPage(QWidget):
             fetch_cat_btn.setEnabled(False)
             def _do():
                 try:
-                    import undetected_chromedriver as uc
-                    from selenium.webdriver.common.by import By
-                    import time as _t, re as _re
-                    opts = uc.ChromeOptions()
-                    opts.add_argument("--start-maximized")
-                    opts.add_argument("--no-sandbox")
-                    opts.add_argument("--disable-dev-shm-usage")
-                    opts.add_argument("--disable-gpu")
-                    opts.add_argument("--user-data-dir=./chrome_profile")
-                    driver = make_uc_driver(opts)
+                    import requests as _req
+                    import re as _re
+                    cats = []
+                    headers = {
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+                        'Referer': 'https://blog.naver.com/',
+                    }
+                    # 방법1: Naver 카테고리 API (로그인 불필요)
                     try:
-                        if not naver_login_with_fallback(driver, naver_id, password):
-                            driver.quit()
-                            return [], "❌ 로그인 실패 — ID/PW 확인 또는 2단계 인증 해제 필요"
-                        cats = []
-                        # 방법1: API로 카테고리 가져오기
+                        cat_url = f"https://blog.naver.com/NBlogCategoryListAjax.naver?blogId={naver_id}"
+                        resp = _req.get(cat_url, headers=headers, timeout=10)
+                        page_text = resp.text
+                        if 'categoryName' in page_text:
+                            raw_names = _re.findall(r'"categoryName"\s*:\s*"([^"]+)"', page_text)
+                            for cn in raw_names:
+                                try:
+                                    decoded = cn.encode('latin-1').decode('unicode_escape').encode('latin-1').decode('utf-8')
+                                except Exception:
+                                    decoded = cn
+                                decoded = decoded.strip()
+                                if decoded and decoded not in cats:
+                                    cats.append(decoded)
+                    except Exception:
+                        pass
+                    # 방법2: 블로그 메인 스크래핑
+                    if not cats:
                         try:
-                            cat_url = f"https://blog.naver.com/NBlogCategoryListAjax.naver?blogId={naver_id}"
-                            driver.get(cat_url)
-                            _t.sleep(2)
-                            page_text = driver.page_source
-                            if 'categoryName' in page_text:
-                                cat_names = _re.findall(r'"categoryName"\s*:\s*"([^"]+)"', page_text)
-                                for cn in cat_names:
-                                    try:
-                                        decoded = cn.encode('utf-8').decode('unicode_escape')
-                                    except Exception:
-                                        decoded = cn
-                                    if decoded and decoded not in cats:
-                                        cats.append(decoded)
+                            from bs4 import BeautifulSoup as _BS
+                            resp2 = _req.get(f"https://blog.naver.com/{naver_id}", headers=headers, timeout=10)
+                            soup = _BS(resp2.text, 'html.parser')
+                            for sel in ['div.category a', 'ul.category_list li a', '#category a', 'a[href*="categoryNo"]']:
+                                for el in soup.select(sel):
+                                    n = _re.sub(r'\s*\(\d+\)\s*$', '', el.get_text().strip()).strip()
+                                    if n and n not in ['전체보기', '분류 전체보기', '카테고리', ''] and n not in cats:
+                                        cats.append(n)
+                                if cats:
+                                    break
                         except Exception:
                             pass
-                        # 방법2: 블로그 메인에서 스크래핑
-                        if not cats:
-                            try:
-                                driver.get(f"https://blog.naver.com/{naver_id}")
-                                _t.sleep(3)
-                                try:
-                                    driver.switch_to.frame("mainFrame")
-                                except Exception:
-                                    pass
-                                for sel in ['div.category a', 'ul.category_list li a', '#category a', 'a[href*="categoryNo"]']:
-                                    try:
-                                        els = driver.find_elements(By.CSS_SELECTOR, sel)
-                                        for el in els:
-                                            n = _re.sub(r'\s*\(\d+\)\s*$', '', el.text.strip()).strip()
-                                            if n and n not in ['전체보기', '분류 전체보기', '카테고리', ''] and n not in cats:
-                                                cats.append(n)
-                                    except Exception:
-                                        continue
-                                    if cats:
-                                        break
-                                driver.switch_to.default_content()
-                            except Exception:
-                                pass
-                        driver.quit()
-                        return cats, f"✅ 카테고리 {len(cats)}개 가져옴" if cats else "⚠️ 카테고리를 찾을 수 없습니다"
-                    except Exception as e:
-                        try: driver.quit()
-                        except Exception: pass
-                        return [], f"❌ 오류: {e}"
-                except ImportError:
-                    return [], "⚠️ undetected-chromedriver 미설치: pip install undetected-chromedriver"
+                    if cats:
+                        return cats, f"✅ 카테고리 {len(cats)}개 가져옴"
+                    return [], "⚠️ 카테고리를 찾을 수 없습니다 (블로그에 카테고리가 있는지 확인하거나 직접 입력하세요)"
                 except Exception as e:
                     return [], f"❌ 오류: {e}"
 
@@ -17382,6 +17362,12 @@ class MultiPlatformPage(QWidget):
         if path:
             with open(path, 'w', encoding='utf-8') as f: f.write(text)
             self._log(f"💾 저장: {path}")
+
+    def _on_result_edited(self, key, editor):
+        """결과 에디터가 수동으로 수정될 때 _results 동기화 및 자동 저장"""
+        text = editor.toPlainText()
+        self._results[key] = text
+        self._save_state()
 
     def _mp_acc_url_changed(self, idx):
         if idx <= 0: return
@@ -17762,6 +17748,7 @@ class MultiPlatformPage(QWidget):
             for k, v in st.get('results', {}).items():
                 if k in self._result_widgets and v:
                     self._result_widgets[k].setPlainText(v)
+                    self._results[k] = v
             for k, v in st.get('checks', {}).items():
                 if k in self._platform_checks:
                     self._platform_checks[k].setChecked(v)
@@ -17799,6 +17786,16 @@ class MultiPlatformPage(QWidget):
                         self._mp_post_list.addItem(item)
                 if hasattr(self, '_s3_src_list'):
                     self._s3_sync_src_list()
+            # 복원된 결과로 STEP3 미리보기 및 탭 표시 갱신
+            keys = [k for k, _ in self.PLATFORMS]
+            for k, v in st.get('results', {}).items():
+                if v and k in keys:
+                    idx = keys.index(k)
+                    label = dict(self.PLATFORMS).get(k, k)
+                    if hasattr(self, 'result_tabs'):
+                        self.result_tabs.setTabText(idx, f"✅ {label}")
+            if any(st.get('results', {}).values()):
+                self._update_step4_previews()
         except Exception:
             pass
 
