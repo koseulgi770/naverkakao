@@ -12828,8 +12828,15 @@ class AgencyKeywordPage(_AgencyStateMixin, QWidget):
         t.start()
 
     def _scrape_lablog(self, keywords, options):
-        import undetected_chromedriver as uc
         import os as _os
+
+        # ── undetected_chromedriver 가용 여부 확인 ──
+        try:
+            import undetected_chromedriver as uc
+            _uc_available = True
+        except ImportError:
+            print("[Lablog] undetected_chromedriver 없음 → selenium 폴백 모드")
+            _uc_available = False
 
         # ── 프로파일 결정 ─────────────────────────────────
         use_my = bool(options.get('use_my_chrome', False))
@@ -12881,17 +12888,33 @@ class AgencyKeywordPage(_AgencyStateMixin, QWidget):
         cleanup_chrome_and_locks()
 
         # UC는 ChromeOptions 인스턴스를 재사용 못 함 → 빌더 람다 사용
-        def build_opts():
-            o = uc.ChromeOptions()
-            o.add_argument('--start-maximized')
-            o.add_argument(f'--user-data-dir={profile_dir}')
-            if use_my:
-                o.add_argument(f'--profile-directory={profile_name}')
-            o.add_argument('--no-sandbox'); o.add_argument('--disable-dev-shm-usage')
-            return o
+        if _uc_available:
+            def build_opts():
+                o = uc.ChromeOptions()
+                o.add_argument('--start-maximized')
+                o.add_argument(f'--user-data-dir={profile_dir}')
+                if use_my:
+                    o.add_argument(f'--profile-directory={profile_name}')
+                o.add_argument('--no-sandbox'); o.add_argument('--disable-dev-shm-usage')
+                return o
+            _driver_builder = lambda: make_uc_driver(build_opts)
+        else:
+            def build_opts():
+                from selenium.webdriver.chrome.options import Options as _SOpts
+                o = _SOpts()
+                o.add_argument('--start-maximized')
+                o.add_argument(f'--user-data-dir={profile_dir}')
+                if use_my:
+                    o.add_argument(f'--profile-directory={profile_name}')
+                o.add_argument('--no-sandbox'); o.add_argument('--disable-dev-shm-usage')
+                o.add_argument('--disable-blink-features=AutomationControlled')
+                return o
+            def _driver_builder():
+                from selenium import webdriver as _wd
+                return _wd.Chrome(options=build_opts())
 
         try:
-            driver = make_uc_driver(build_opts)
+            driver = _driver_builder()
             print(f"[Lablog] driver 생성 완료")
         except Exception as e:
             msg = format_error_message(e)
@@ -12917,7 +12940,7 @@ class AgencyKeywordPage(_AgencyStateMixin, QWidget):
                 else:
                     print("[Lablog] 옵션 A → 사용자 Chrome 프로파일은 통째 삭제하지 않음 (락만 정리)")
                 try:
-                    driver = make_uc_driver(build_opts)
+                    driver = _driver_builder()
                     print("[Lablog] 2차 driver 생성 성공")
                 except Exception as e3:
                     msg3 = format_error_message(e3)
