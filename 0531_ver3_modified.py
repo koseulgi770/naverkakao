@@ -13291,10 +13291,45 @@ class AgencyKeywordPage(_AgencyStateMixin, QWidget):
         ts = _dt.now().strftime('%Y%m%d_%H%M%S')
         try:
             from openpyxl import Workbook
+            from openpyxl.styles import PatternFill, Font, Alignment
             wb = Workbook(); ws = wb.active
             ws.title = f"Batch{batch_num}"
-            if headers: ws.append(headers)
-            for row in rows: ws.append(row)
+            if headers:
+                ws.append(headers)
+                for col_idx, h in enumerate(headers, 1):
+                    ws.cell(1, col_idx).font = Font(bold=True)
+            for row in rows:
+                ws.append(row)
+                row_idx = ws.max_row
+                # 순위 컬럼(1위~5위) 색 적용 — headers 기준으로 위치 찾기
+                rank_cols = []
+                if headers:
+                    for ci, h in enumerate(headers, 1):
+                        if h in ('1위', '2위', '3위', '4위', '5위'):
+                            rank_cols.append(ci)
+                else:
+                    # 헤더 없으면 9~13번째 컬럼 추정 (키워드~자동완성 8개 다음)
+                    rank_cols = list(range(9, 14))
+                for ci in rank_cols:
+                    val = ws.cell(row_idx, ci).value or ''
+                    val_l = str(val).lower()
+                    if '최적' in val_l and '준최' not in val_l:
+                        fill = PatternFill('solid', fgColor='FF4444')
+                        ws.cell(row_idx, ci).font = Font(color='FFFFFF', bold=True)
+                    elif '준최' in val_l:
+                        fill = PatternFill('solid', fgColor='4472C4')
+                        ws.cell(row_idx, ci).font = Font(color='FFFFFF', bold=True)
+                    elif '카페' in val_l:
+                        fill = PatternFill('solid', fgColor='A5A5A5')
+                        ws.cell(row_idx, ci).font = Font(color='FFFFFF')
+                    elif 'nb' in val_l or '미측정' in val_l or '미포함' in val_l:
+                        fill = PatternFill('solid', fgColor='D9D9D9')
+                        ws.cell(row_idx, ci).font = Font(color='666666')
+                    else:
+                        fill = None
+                    if fill:
+                        ws.cell(row_idx, ci).fill = fill
+                    ws.cell(row_idx, ci).alignment = Alignment(horizontal='center')
             path = out_dir / f"lablog_batch{batch_num:02d}_{ts}.xlsx"
             wb.save(path)
             return str(path)
@@ -13322,17 +13357,58 @@ class AgencyKeywordPage(_AgencyStateMixin, QWidget):
         self._state_save()
 
     def export_lablog_excel(self):
-        path, _ = QFileDialog.getSaveFileName(self, "엑셀 저장", "lablog_keywords.csv", "CSV (*.csv)")
+        path, _ = QFileDialog.getSaveFileName(self, "엑셀 저장", "lablog_keywords.xlsx",
+                                              "Excel (*.xlsx);;CSV (*.csv)")
         if not path: return
+        headers = getattr(self, '_lablog_headers', None)
         try:
-            import csv
-            with open(path, 'w', encoding='utf-8-sig', newline='') as f:
-                w = csv.writer(f)
-                w.writerow(["키워드", "월간 검색량", "자동완성", "연관검색어"])
+            if path.lower().endswith('.xlsx'):
+                from openpyxl import Workbook
+                from openpyxl.styles import PatternFill, Font, Alignment
+                wb = Workbook(); ws = wb.active
+                ws.title = "블연플"
+                if headers:
+                    ws.append(headers)
+                    for ci, h in enumerate(headers, 1):
+                        ws.cell(1, ci).font = Font(bold=True)
+                rank_col_indices = []
+                if headers:
+                    rank_col_indices = [i+1 for i, h in enumerate(headers) if h in ('1위','2위','3위','4위','5위')]
+                else:
+                    rank_col_indices = list(range(9, 14))
                 for row in self._lablog_results:
-                    padded = list(row[:4]) + [''] * max(0, 4 - len(row))
-                    w.writerow(padded)
+                    ws.append(list(row))
+                    ri = ws.max_row
+                    for ci in rank_col_indices:
+                        if ci > len(row): continue
+                        val = str(row[ci-1] if ci <= len(row) else '')
+                        val_l = val.lower()
+                        if '최적' in val_l and '준최' not in val_l:
+                            fill = PatternFill('solid', fgColor='FF4444')
+                            ws.cell(ri, ci).font = Font(color='FFFFFF', bold=True)
+                        elif '준최' in val_l:
+                            fill = PatternFill('solid', fgColor='4472C4')
+                            ws.cell(ri, ci).font = Font(color='FFFFFF', bold=True)
+                        elif '카페' in val_l:
+                            fill = PatternFill('solid', fgColor='A5A5A5')
+                            ws.cell(ri, ci).font = Font(color='FFFFFF')
+                        elif 'nb' in val_l or '미측정' in val_l or '미포함' in val_l:
+                            fill = PatternFill('solid', fgColor='D9D9D9')
+                            ws.cell(ri, ci).font = Font(color='666666')
+                        else:
+                            fill = None
+                        if fill: ws.cell(ri, ci).fill = fill
+                        ws.cell(ri, ci).alignment = Alignment(horizontal='center')
+                wb.save(path)
+            else:
+                import csv
+                with open(path, 'w', encoding='utf-8-sig', newline='') as f:
+                    w = csv.writer(f)
+                    if headers: w.writerow(headers)
+                    for row in self._lablog_results:
+                        w.writerow(list(row))
             self.main.log(f"💾 저장: {path}")
+            self.lablog_excel_btn.setEnabled(True)
         except Exception as e:
             self.main.log(f"❌ 저장 실패: {e}")
 
