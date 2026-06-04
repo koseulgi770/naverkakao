@@ -13363,8 +13363,15 @@ class AgencyKeywordPage(_AgencyStateMixin, QWidget):
         headers = getattr(self, '_lablog_headers', None)
         try:
             if path.lower().endswith('.xlsx'):
-                from openpyxl import Workbook
-                from openpyxl.styles import PatternFill, Font, Alignment
+                try:
+                    from openpyxl import Workbook
+                    from openpyxl.styles import PatternFill, Font, Alignment
+                except ImportError:
+                    import subprocess, sys
+                    self.main.log("⚙️ openpyxl 설치 중... (최초 1회)")
+                    subprocess.run([sys.executable, '-m', 'pip', 'install', 'openpyxl'], check=True)
+                    from openpyxl import Workbook
+                    from openpyxl.styles import PatternFill, Font, Alignment
                 wb = Workbook(); ws = wb.active
                 ws.title = "블연플"
                 if headers:
