@@ -11931,7 +11931,7 @@ class _AgencyStateMixin:
 
 class AgencyCategoryPage(QWidget):
     CATEGORIES = [
-        ("🧙 단계별 진행",   "agency_wizard"),
+        ("⚙️ 설정",            "agency_config"),
         ("📊 키워드 지수확인", "agency_keyword"),
         ("🔬 형태소 분석",   "agency_morphology"),
         ("🖼️ 이미지",         "agency_image"),
@@ -11944,8 +11944,8 @@ class AgencyCategoryPage(QWidget):
         self._page_cache = {}
         self._current_key = None
         self._build_ui()
-        # 기본 진입: 단계별 진행
-        self._switch("agency_wizard")
+        # 기본 진입: 설정
+        self._switch("agency_config")
 
     def _build_ui(self):
         root = QVBoxLayout(self)
@@ -12006,7 +12006,10 @@ class AgencyCategoryPage(QWidget):
             btn.setStyleSheet(self._checked_style() if checked else self._unchecked_style())
 
         if key not in self._page_cache:
-            page = self.main.get_or_create_page(key)
+            if key == "agency_config":
+                page = self._build_config_page()
+            else:
+                page = self.main.get_or_create_page(key)
             if page is None:
                 try: self.main.log(f"⚠️ {key} 페이지 생성 실패")
                 except Exception: pass
@@ -12018,6 +12021,167 @@ class AgencyCategoryPage(QWidget):
         self._current_key = key
         try: self.main.log(f"📂 대행/후기성: {key}")
         except Exception: pass
+
+    def _build_config_page(self):
+        """설정 페이지 — 네이버 계정 + 프롬프트 라이브러리"""
+        from PyQt6.QtWidgets import QScrollArea, QGroupBox
+        w = QWidget()
+        w.setStyleSheet("background:#1e1e1e; color:#fff;")
+        outer = QVBoxLayout(w)
+        outer.setContentsMargins(24, 16, 24, 16)
+        outer.setSpacing(16)
+
+        hdr = QLabel("⚙️ 설정")
+        hdr.setStyleSheet("font-size:16px; font-weight:bold; color:#FFD700;")
+        outer.addWidget(hdr)
+
+        # ── 네이버 계정 ──
+        acc_box = QGroupBox("🇰🇷 네이버 계정")
+        acc_box.setStyleSheet("""
+            QGroupBox { color:#FFD700; font-weight:bold; border:1px solid #444;
+                        border-radius:6px; margin-top:8px; padding-top:8px; }
+            QGroupBox::title { subcontrol-origin:margin; left:10px; }
+        """)
+        acc_lay = QVBoxLayout(acc_box)
+        acc_lay.setSpacing(8)
+
+        naver_accs = self.main.config.get('naver_accounts', []) or []
+
+        INP = "color:#fff; background:#2a2a2a; border:1px solid #555; padding:4px 8px; border-radius:4px;"
+        BTN = "padding:5px 14px; border-radius:4px; font-size:12px;"
+
+        self._cfg_acc_combo = QComboBox()
+        self._cfg_acc_combo.setStyleSheet("color:#fff; background:#2a2a2a; border:1px solid #555; padding:4px;")
+        self._cfg_acc_combo.addItem("— 계정 선택 —")
+        for a in naver_accs:
+            self._cfg_acc_combo.addItem(a.get('id', ''))
+        self._cfg_acc_combo.currentIndexChanged.connect(self._cfg_load_acc)
+        acc_lay.addWidget(self._cfg_acc_combo)
+
+        row1 = QHBoxLayout()
+        row1.addWidget(QLabel("아이디:"))
+        self._cfg_nv_id = QLineEdit(); self._cfg_nv_id.setStyleSheet(INP)
+        row1.addWidget(self._cfg_nv_id, 1)
+        row1.addWidget(QLabel("비밀번호:"))
+        self._cfg_nv_pw = QLineEdit(); self._cfg_nv_pw.setEchoMode(QLineEdit.EchoMode.Password)
+        self._cfg_nv_pw.setStyleSheet(INP)
+        row1.addWidget(self._cfg_nv_pw, 1)
+        eye = QPushButton("👁"); eye.setFixedWidth(30); eye.setCheckable(True)
+        eye.setStyleSheet("background:#444; border:1px solid #666; border-radius:3px;")
+        eye.toggled.connect(lambda on: self._cfg_nv_pw.setEchoMode(
+            QLineEdit.EchoMode.Normal if on else QLineEdit.EchoMode.Password))
+        row1.addWidget(eye)
+        acc_lay.addLayout(row1)
+
+        btn_row = QHBoxLayout()
+        save_btn = QPushButton("💾 저장")
+        save_btn.setStyleSheet(f"background:#2d8a4e; color:#fff; {BTN}")
+        save_btn.clicked.connect(self._cfg_save_acc)
+        btn_row.addWidget(save_btn)
+        del_btn = QPushButton("🗑 삭제")
+        del_btn.setStyleSheet(f"background:#8e2d2d; color:#fff; {BTN}")
+        del_btn.clicked.connect(self._cfg_del_acc)
+        btn_row.addWidget(del_btn)
+        btn_row.addStretch()
+        acc_lay.addLayout(btn_row)
+
+        self._cfg_acc_status = QLabel("")
+        self._cfg_acc_status.setStyleSheet("color:#aaa; font-size:11px;")
+        acc_lay.addWidget(self._cfg_acc_status)
+        outer.addWidget(acc_box)
+
+        # ── 프롬프트 ──
+        prompt_box = QGroupBox("📝 프롬프트 라이브러리")
+        prompt_box.setStyleSheet(acc_box.styleSheet())
+        pr_lay = QVBoxLayout(prompt_box)
+        pr_lay.setSpacing(8)
+
+        pr_desc = QLabel("글 생성 시 사용할 커스텀 프롬프트를 저장·관리합니다.")
+        pr_desc.setStyleSheet("color:#aaa; font-size:12px;")
+        pr_lay.addWidget(pr_desc)
+
+        pr_btn_row = QHBoxLayout()
+        open_lib_btn = QPushButton("🗂 프롬프트 라이브러리 열기")
+        open_lib_btn.setStyleSheet(f"background:#2d5a8e; color:#fff; padding:8px 16px; border-radius:5px;")
+        open_lib_btn.clicked.connect(self._cfg_open_prompt_library)
+        pr_btn_row.addWidget(open_lib_btn)
+        pr_btn_row.addStretch()
+        pr_lay.addLayout(pr_btn_row)
+
+        self._cfg_prompt_lbl = QLabel("선택된 프롬프트: 없음")
+        self._cfg_prompt_lbl.setStyleSheet("color:#888; font-size:11px;")
+        pr_lay.addWidget(self._cfg_prompt_lbl)
+        outer.addWidget(prompt_box)
+
+        outer.addStretch()
+        return w
+
+    def _cfg_load_acc(self, idx):
+        if idx <= 0:
+            self._cfg_nv_id.clear(); self._cfg_nv_pw.clear()
+            return
+        accs = self.main.config.get('naver_accounts', []) or []
+        if idx - 1 < len(accs):
+            a = accs[idx - 1]
+            self._cfg_nv_id.setText(a.get('id', ''))
+            self._cfg_nv_pw.setText(a.get('pw', ''))
+
+    def _cfg_save_acc(self):
+        nid = self._cfg_nv_id.text().strip()
+        npw = self._cfg_nv_pw.text().strip()
+        if not nid:
+            self._cfg_acc_status.setText("⚠️ 아이디를 입력하세요"); return
+        accs = self.main.config.get('naver_accounts', []) or []
+        for a in accs:
+            if a.get('id') == nid:
+                a['pw'] = npw
+                self._cfg_acc_status.setText(f"✅ {nid} 업데이트됨")
+                self._cfg_refresh_combo()
+                self._save_config()
+                return
+        accs.append({'id': nid, 'pw': npw})
+        self.main.config['naver_accounts'] = accs
+        self._cfg_acc_status.setText(f"✅ {nid} 추가됨")
+        self._cfg_refresh_combo()
+        self._save_config()
+
+    def _cfg_del_acc(self):
+        idx = self._cfg_acc_combo.currentIndex()
+        if idx <= 0: return
+        accs = self.main.config.get('naver_accounts', []) or []
+        if idx - 1 < len(accs):
+            removed = accs.pop(idx - 1)
+            self.main.config['naver_accounts'] = accs
+            self._cfg_acc_status.setText(f"🗑 {removed.get('id','')} 삭제됨")
+            self._cfg_refresh_combo()
+            self._save_config()
+
+    def _cfg_refresh_combo(self):
+        accs = self.main.config.get('naver_accounts', []) or []
+        self._cfg_acc_combo.blockSignals(True)
+        self._cfg_acc_combo.clear()
+        self._cfg_acc_combo.addItem("— 계정 선택 —")
+        for a in accs:
+            self._cfg_acc_combo.addItem(a.get('id', ''))
+        self._cfg_acc_combo.blockSignals(False)
+
+    def _cfg_save_config(self):
+        try:
+            import json
+            with open('config.json', 'w', encoding='utf-8') as f:
+                json.dump(self.main.config, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+    def _save_config(self):
+        self._cfg_save_config()
+
+    def _cfg_open_prompt_library(self):
+        try:
+            dlg = PromptLibraryDialog(parent=self)
+            dlg.exec()
+        except Exception as e:
+            self._cfg_prompt_lbl.setText(f"❌ 오류: {e}")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -12214,19 +12378,32 @@ class AgencyKeywordPage(_AgencyStateMixin, QWidget):
         t.start()
 
     def _scrape_mapia(self, keywords):
-        import undetected_chromedriver as uc
         print(f"[Mapia] ▶ 시작: {len(keywords)}개 키워드 {keywords}")
-
-        # UC는 ChromeOptions 인스턴스를 재사용 못 함 — 빌더 람다로 전달 (재시도 시 새로 생성됨)
-        def build_opts():
-            o = uc.ChromeOptions()
-            o.add_argument('--start-maximized'); o.add_argument('--no-sandbox')
-            o.add_argument('--disable-dev-shm-usage'); o.add_argument('--disable-gpu')
-            return o
-
         print("[Mapia] Chrome driver 생성 중... (몇 초 걸립니다, 앱 닫지 마세요)")
+
+        driver = None
         try:
+            import undetected_chromedriver as uc
+            def build_opts():
+                o = uc.ChromeOptions()
+                o.add_argument('--start-maximized'); o.add_argument('--no-sandbox')
+                o.add_argument('--disable-dev-shm-usage'); o.add_argument('--disable-gpu')
+                return o
             driver = make_uc_driver(build_opts)
+        except ImportError:
+            print("[Mapia] undetected_chromedriver 없음 → selenium 폴백 시도")
+            try:
+                from selenium import webdriver
+                from selenium.webdriver.chrome.options import Options as _Opts
+                _o = _Opts()
+                _o.add_argument('--start-maximized'); _o.add_argument('--no-sandbox')
+                _o.add_argument('--disable-dev-shm-usage'); _o.add_argument('--disable-gpu')
+                _o.add_argument('--disable-blink-features=AutomationControlled')
+                driver = webdriver.Chrome(options=_o)
+            except Exception as e2:
+                print(f"[Mapia] ❌ selenium 폴백도 실패: {e2}")
+                return {'seeds': keywords, 'headers': [], 'rows': [],
+                        'error': f'ChromeDriver 없음 — undetected-chromedriver 또는 selenium 설치 필요: {e2}'}
         except Exception as e:
             print(f"[Mapia] ❌ driver 생성 실패: {e}")
             return {'seeds': keywords, 'headers': [], 'rows': [],
