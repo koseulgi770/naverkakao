@@ -13164,29 +13164,6 @@ class AgencyKeywordPage(_AgencyStateMixin, QWidget):
 
                     chunk_rows = []
 
-                    # 첫 쿼리에서 페이지 구조 광범위 디버그
-                    if ci == 0:
-                        try:
-                            print(f"  [DEBUG] 검색 후 URL: {driver.current_url}")
-                            print(f"  [DEBUG] table: {len(driver.find_elements(By.TAG_NAME, 'table'))}, "
-                                  f"role=row: {len(driver.find_elements(By.CSS_SELECTOR, '[role=row]'))}, "
-                                  f"role=grid: {len(driver.find_elements(By.CSS_SELECTOR, '[role=grid]'))}, "
-                                  f"MuiDataGrid: {len(driver.find_elements(By.CSS_SELECTOR, '[class*=MuiDataGrid]'))}")
-                            # data/result 관련 클래스 div 미리보기
-                            print(f"  [DEBUG] 결과처럼 보이는 div (최대 5개):")
-                            for d in driver.find_elements(By.TAG_NAME, "div")[:200]:
-                                try:
-                                    cls = d.get_attribute('class') or ''
-                                    if not cls: continue
-                                    low = cls.lower()
-                                    if any(kw in low for kw in ['row', 'cell', 'data', 'result', 'table', 'grid', 'list']):
-                                        txt = (d.text or '')[:50].replace('\n', ' | ')
-                                        if txt and 5 < len(d.text) < 500:
-                                            print(f"    class='{cls[:60]}' text='{txt}'")
-                                except Exception: pass
-                        except Exception as e:
-                            print(f"  [DEBUG] 페이지 분석 실패: {e}")
-
                     # 패턴 1: <table>
                     try:
                         all_tables = driver.find_elements(By.TAG_NAME, "table")
@@ -13204,39 +13181,45 @@ class AgencyKeywordPage(_AgencyStateMixin, QWidget):
                                     if ths:
                                         self._lablog_headers = [(c.text or '').strip() for c in ths]
                                 except Exception: pass
+                            all_tbl_rows = []
                             for tr in best_tbl.find_elements(By.TAG_NAME, "tr"):
                                 tds = tr.find_elements(By.TAG_NAME, "td")
                                 if len(tds) >= 2:
                                     row = [(c.text or '').strip() for c in tds]
-                                    if any(row): chunk_rows.append(row)
+                                    if any(row): all_tbl_rows.append(row)
+                            # 사이트가 결과를 누적 표시하므로 이전에 수집한 행 수만큼 건너뜀
+                            chunk_rows = all_tbl_rows[len(all_results):]
                     except Exception: pass
 
                     # 패턴 2: role=row + role=cell/gridcell (Material-UI DataGrid 등)
                     if not chunk_rows:
                         try:
+                            all_role_rows = []
                             for r in driver.find_elements(By.CSS_SELECTOR, "[role=row]"):
                                 cells = r.find_elements(By.CSS_SELECTOR, "[role=cell], [role=gridcell]")
                                 if len(cells) >= 2:
                                     row = [(c.text or '').strip() for c in cells]
-                                    if any(row): chunk_rows.append(row)
+                                    if any(row): all_role_rows.append(row)
+                            chunk_rows = all_role_rows[len(all_results):]
                         except Exception: pass
 
                     # 패턴 3: div-based grid (class에 row/cell 포함)
                     if not chunk_rows:
                         try:
                             row_divs = driver.find_elements(By.CSS_SELECTOR, "[class*=row]:not(table):not(tr)")
-                            for r in row_divs[:200]:
+                            all_div_rows = []
+                            for r in row_divs[:500]:
                                 try:
                                     cells = r.find_elements(By.CSS_SELECTOR, "[class*=cell], [class*=col]")
                                     if len(cells) >= 2:
                                         row = [(c.text or '').strip() for c in cells]
                                         if any(row) and not all(len(s) > 200 for s in row):
-                                            chunk_rows.append(row)
+                                            all_div_rows.append(row)
                                 except Exception: pass
+                            chunk_rows = all_div_rows[len(all_results):]
                         except Exception: pass
 
-                    if ci == 0:
-                        print(f"  [DEBUG] 패턴별 결과: chunk_rows={len(chunk_rows)}행")
+                    print(f"  · chunk {ci+1}/{total_chunks}: 새 결과 {len(chunk_rows)}행 (누적 {len(all_results)+len(chunk_rows)}행)")
 
                     batch_rows.extend(chunk_rows)
                     all_results.extend(chunk_rows)
