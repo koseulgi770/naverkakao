@@ -13282,15 +13282,22 @@ class AgencyKeywordPage(_AgencyStateMixin, QWidget):
             print("[Lablog] worker 종료 (브라우저는 유지)")
 
     def _lablog_save_batch(self, rows, batch_num, headers=None):
-        """batch 결과를 ./agency_state/lablog_batches/ 폴더에 저장.
-        openpyxl이 있으면 .xlsx, 없으면 .csv."""
+        """batch 결과를 ./agency_state/lablog_batches/ 폴더에 저장 (.xlsx + 순위 색상)."""
         from pathlib import Path as _P
         from datetime import datetime as _dt
         out_dir = _P('agency_state/lablog_batches')
         out_dir.mkdir(parents=True, exist_ok=True)
         ts = _dt.now().strftime('%Y%m%d_%H%M%S')
         try:
-            from openpyxl import Workbook
+            try:
+                from openpyxl import Workbook
+                from openpyxl.styles import PatternFill, Font, Alignment
+            except ImportError:
+                import subprocess, sys
+                print("[Lablog] openpyxl 없음 → 자동 설치 중...")
+                subprocess.run([sys.executable, '-m', 'pip', 'install', 'openpyxl'], check=True)
+                from openpyxl import Workbook
+                from openpyxl.styles import PatternFill, Font, Alignment
             from openpyxl.styles import PatternFill, Font, Alignment
             wb = Workbook(); ws = wb.active
             ws.title = f"Batch{batch_num}"
