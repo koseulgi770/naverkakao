@@ -12327,12 +12327,31 @@ class AgencyKeywordPage(_AgencyStateMixin, QWidget):
         self.opt_autocomplete = QCheckBox("자동완성"); self.opt_autocomplete.setChecked(True)
         self.opt_related = QCheckBox("연관검색어"); self.opt_related.setChecked(True)
         opts.addWidget(self.opt_autocomplete); opts.addWidget(self.opt_related)
-        opts.addWidget(QLabel("  ※ 5개씩 쿼리 / 60개마다 엑셀 1파일 / 모든 키워드 1회씩 처리"))
         # 호환성 유지용 hidden spinbox (state 저장/복원에서 참조)
         self.lablog_repeat = QSpinBox(); self.lablog_repeat.setRange(1, 50); self.lablog_repeat.setValue(1)
         self.lablog_repeat.setVisible(False)
         opts.addStretch()
         lay.addLayout(opts)
+
+        # 가져올 갯수 옵션
+        fetch_row = QHBoxLayout()
+        fetch_row.addWidget(QLabel("가져올 갯수:"))
+        self.opt_fetch_all = QRadioButton("전체")
+        self.opt_fetch_all.setChecked(True)
+        self.opt_fetch_custom = QRadioButton("직접 입력")
+        self.lablog_fetch_count = QSpinBox()
+        self.lablog_fetch_count.setRange(5, 9999)
+        self.lablog_fetch_count.setSingleStep(5)
+        self.lablog_fetch_count.setValue(10)
+        self.lablog_fetch_count.setEnabled(False)
+        self.lablog_fetch_count.setFixedWidth(80)
+        self.opt_fetch_all.toggled.connect(lambda on: self.lablog_fetch_count.setEnabled(not on))
+        fetch_row.addWidget(self.opt_fetch_all)
+        fetch_row.addWidget(self.opt_fetch_custom)
+        fetch_row.addWidget(self.lablog_fetch_count)
+        fetch_row.addWidget(QLabel("개  (5 단위)"))
+        fetch_row.addStretch()
+        lay.addLayout(fetch_row)
 
         # 프로파일 옵션
         prof_row = QHBoxLayout()
@@ -12812,6 +12831,14 @@ class AgencyKeywordPage(_AgencyStateMixin, QWidget):
             self.main.log("⚠️ 블연플: 키워드를 입력하세요"); return
         if len(keywords) != len(raw_keywords):
             self.main.log(f"🧹 키워드 정제: {len(raw_keywords)}개 → {len(keywords)}개 (중복/아이콘 텍스트 제거)")
+        # 가져올 갯수 제한
+        if self.opt_fetch_custom.isChecked():
+            limit = self.lablog_fetch_count.value()
+            # 5 단위로 올림
+            limit = ((limit + 4) // 5) * 5
+            if limit < len(keywords):
+                keywords = keywords[:limit]
+                self.main.log(f"📌 갯수 제한: 상위 {limit}개만 조회")
         self.lablog_btn.setEnabled(False); self.lablog_btn.setText("🚀 조회 중...")
         options = {
             'autocomplete': self.opt_autocomplete.isChecked(),
