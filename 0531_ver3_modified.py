@@ -15368,8 +15368,20 @@ class MultiPlatformPage(QWidget):
         self._worker = None
         self._pending = []
         self._mp_active_prompt = ''
-        self._build_ui()
-        self._load_state()
+        print('[MP-DEBUG] __init__ start')
+        try:
+            self._build_ui()
+            print('[MP-DEBUG] _build_ui done')
+        except Exception as _e:
+            print(f'[MP-DEBUG] _build_ui FAILED: {_e}')
+            import traceback; traceback.print_exc()
+            return
+        try:
+            self._load_state()
+            print('[MP-DEBUG] _load_state done')
+        except Exception as _e:
+            print(f'[MP-DEBUG] _load_state FAILED: {_e}')
+            import traceback; traceback.print_exc()
         # 라이브러리 개수 초기 표시
         if os.path.exists(PromptLibraryDialog.LIBRARY_FILE):
             try:
@@ -15438,15 +15450,21 @@ class MultiPlatformPage(QWidget):
         self._stack = _QSW_MP()
         root.addWidget(self._stack, 1)
 
+        print('[MP-DEBUG] building step1')
         self._build_step1()   # STEP1 = 설정
+        print('[MP-DEBUG] building step2')
         self._build_step2()   # STEP2 = 원본 입력 & AI 변환 (합쳐진)
+        print('[MP-DEBUG] building step3')
         self._build_step3()   # STEP3 = 업로드
+        print('[MP-DEBUG] refreshing acc table')
 
         # step2 생성 후 계정 콤보 다시 갱신 (빌드 순서 이슈 보정)
         if hasattr(self, '_acc_table'):
             self._refresh_acc_table()
 
+        print('[MP-DEBUG] go_step 0')
         self._go_step(0)
+        print('[MP-DEBUG] _build_ui complete')
 
     def _go_step(self, idx):
         self._stack.setCurrentIndex(idx)
@@ -16860,6 +16878,7 @@ class MultiPlatformPage(QWidget):
         return None
 
     def _upload_naver(self, result_edit, _cb=None, upload_mode="publish"):
+        print('[MP-DEBUG] _upload_naver called')
         acc = self._get_selected_nv_account()
         if not acc:
             msg = "⚠️ 네이버 계정을 선택하세요"
@@ -16881,6 +16900,7 @@ class MultiPlatformPage(QWidget):
         saved_cats = self.main.config.get(cat_key, [])
 
         # 카테고리 선택 다이얼로그
+        print('[MP-DEBUG] creating dialog')
         from PyQt6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QComboBox, QPushButton, QLineEdit
         dlg = QDialog(self)
         dlg.setWindowTitle("네이버 업로드 설정")
@@ -17018,6 +17038,7 @@ class MultiPlatformPage(QWidget):
         ok_btn.clicked.connect(dlg.accept)
         cancel_btn.clicked.connect(dlg.reject)
 
+        print('[MP-DEBUG] calling dlg.exec()')
         if dlg.exec() != QDialog.DialogCode.Accepted:
             if _cb: _cb("⏭ 업로드 취소됨")
             return
