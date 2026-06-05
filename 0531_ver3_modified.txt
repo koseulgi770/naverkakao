@@ -13493,11 +13493,14 @@ class AgencyMorphologyPage(_AgencyStateMixin, QWidget):
         self.title_table = QTableWidget(0, 3)
         self.title_table.setHorizontalHeaderLabels(["제목", "키워드 위치", "패턴"])
         self.title_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.title_table.setStyleSheet("QTableWidget { color:#ffffff; background:#1e1e1e; } QHeaderView::section { color:#FFD700; background:#2a2a2a; }")
         left_l.addWidget(self.title_table, 2)
-        left_l.addWidget(QLabel("✨ SEO 최적화 제목 5개 (GPT 생성)"))
-        self.seo_titles = QTextEdit(); self.seo_titles.setMaximumHeight(130)
+        left_l.addWidget(QLabel("✨ GPT 본문 생성 결과"))
+        self.seo_titles = QTextEdit()
+        self.seo_titles.setMaximumHeight(130)
+        self.seo_titles.setStyleSheet("background:#1a1a1a; color:#ffffff; font-size:12px;")
         left_l.addWidget(self.seo_titles)
-        self.gen_titles_btn = QPushButton("🪄 GPT로 SEO 제목 5개 생성")
+        self.gen_titles_btn = QPushButton("🪄 GPT 본문 생성")
         self.gen_titles_btn.clicked.connect(self.gen_seo_titles)
         self.gen_titles_btn.setEnabled(False)
         left_l.addWidget(self.gen_titles_btn)
@@ -13526,6 +13529,7 @@ class AgencyMorphologyPage(_AgencyStateMixin, QWidget):
         self.body_table = QTableWidget(0, 6)
         self.body_table.setHorizontalHeaderLabels(["URL", "키워드 빈도", "이미지", "영상", "지도", "해시태그"])
         self.body_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.body_table.setStyleSheet("QTableWidget { color:#ffffff; background:#1e1e1e; } QHeaderView::section { color:#FFD700; background:#2a2a2a; }")
         right_l.addWidget(self.body_table, 1)
         splitter.addWidget(right_w)
 
@@ -13598,14 +13602,26 @@ class AgencyMorphologyPage(_AgencyStateMixin, QWidget):
     def _send_to_upload(self):
         seo = self.seo_titles.toPlainText().strip()
         titles = [it.get('title', '') for it in self._analysis_data if it.get('title')]
-        title_to_send = ''
-        if seo:
-            title_to_send = seo.splitlines()[0].strip().lstrip('0123456789.-) ')
-        elif titles:
-            title_to_send = titles[0]
+        title_to_send = titles[0] if titles else ''
         body_to_send = seo if seo else "\n".join(titles)
+
+        # 어느 업로드 탭으로 보낼지 선택
+        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QDialogButtonBox
+        dlg = QDialog(self)
+        dlg.setWindowTitle("업로드 탭 선택")
+        dlg.setStyleSheet("background:#2a2a2a; color:#fff;")
+        dlg_l = QVBoxLayout(dlg)
+        dlg_l.addWidget(QLabel("어느 업로드 탭으로 보낼까요?"))
+        rb_auto   = QRadioButton("🤖 자동 업로드 (애드몽)"); rb_auto.setChecked(True)
+        rb_manual = QRadioButton("✍️ 수동 업로드")
+        dlg_l.addWidget(rb_auto); dlg_l.addWidget(rb_manual)
+        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        btns.accepted.connect(dlg.accept); btns.rejected.connect(dlg.reject)
+        dlg_l.addWidget(btns)
+        if dlg.exec() != QDialog.DialogCode.Accepted: return
+        target_tab = 0 if rb_auto.isChecked() else 1  # 0=자동, 1=수동
+
         try:
-            # AgencyCategoryPage는 self의 부모 위젯
             agency_page = None
             w = self.parent()
             while w is not None:
@@ -13617,11 +13633,13 @@ class AgencyMorphologyPage(_AgencyStateMixin, QWidget):
             agency_page._switch('agency_upload')
             upload_page = agency_page._page_cache.get('agency_upload')
             if upload_page:
-                if title_to_send:
-                    upload_page.title_input.setText(title_to_send)
-                if body_to_send:
-                    upload_page.body_editor.setPlainText(body_to_send)
-                self.main.log("🚀 업로드 탭으로 제목+내용 전송 완료")
+                upload_page._upload_tabs.setCurrentIndex(target_tab)
+                if target_tab == 1:  # 수동 탭
+                    if title_to_send: upload_page.title_input.setText(title_to_send)
+                    if body_to_send:  upload_page.body_editor.setPlainText(body_to_send)
+                # 수신 내용 미리보기 표시
+                upload_page._show_received(title_to_send, body_to_send)
+                self.main.log(f"🚀 업로드 {'자동' if target_tab==0 else '수동'} 탭으로 전송 완료")
             else:
                 self.main.log("⚠️ 업로드 페이지를 열 수 없습니다")
         except Exception as e:
@@ -13764,11 +13782,17 @@ class AgencyMorphologyPage(_AgencyStateMixin, QWidget):
         api_key = self.main.config.get('openai_api_key', '')
         if not api_key:
             self.main.log("⚠️ 설정에서 OpenAI API 키를 입력하세요"); return
+        # 본문 미리보기 텍스트 수집
+        previews = [it.get('body_preview', '') for it in self._analysis_data if it.get('body_preview')]
+        avg_img = sum(it.get('image_count', 0) for it in self._analysis_data) / max(len(self._analysis_data), 1)
         prompt = (
-            f"다음은 '{keyword}' 키워드로 검색된 네이버 블로그 상위글의 제목들입니다.\n\n"
-            + "\n".join(f"- {t}" for t in titles[:15])
-            + f"\n\n위 패턴을 참고하여 '{keyword}' 키워드를 포함한 SEO 최적화 블로그 제목을 5개 만들어주세요.\n"
-              "각 제목은 한 줄에 하나씩, 번호 없이 출력해주세요."
+            f"다음은 네이버 블로그에서 '{keyword}' 키워드로 검색된 상위글의 제목과 본문 일부입니다.\n\n"
+            + "\n".join(f"[{i+1}위] 제목: {t}\n본문: {previews[i][:300] if i < len(previews) else ''}"
+                        for i, t in enumerate(titles[:5]))
+            + f"\n\n위 내용을 참고하여 '{keyword}' 키워드를 포함한 네이버 블로그 본문을 작성해주세요.\n"
+              f"- 평균 이미지 수: {avg_img:.0f}장 수준으로 [이미지] 자리 표시\n"
+              "- 소제목(##)을 사용하고, 자연스럽고 정보성 있는 글로 1000자 이상 작성\n"
+              "- 해시태그를 글 마지막에 5개 추가"
         )
         self.gen_titles_btn.setEnabled(False); self.gen_titles_btn.setText("🪄 생성 중...")
         t = WorkerThread(call_openai_text, api_key, prompt, 'gpt-4o')
@@ -13777,7 +13801,7 @@ class AgencyMorphologyPage(_AgencyStateMixin, QWidget):
         t.result_signal.connect(lambda r: self.seo_titles.setPlainText(r if isinstance(r, str) else str(r)))
         t.finished_signal.connect(lambda: (
             self.gen_titles_btn.setEnabled(True),
-            self.gen_titles_btn.setText("🪄 GPT로 SEO 제목 5개 생성")))
+            self.gen_titles_btn.setText("🪄 GPT 본문 생성")))
         t.start()
 
 
@@ -14078,15 +14102,29 @@ class AgencyUploadPage(_AgencyStateMixin, QWidget):
         outer.addWidget(title_top)
 
         self._upload_tabs = _QTabWidget_Agency()
+
+        admong_w = QWidget()
+        self._build_admong_tab(admong_w)
+        self._upload_tabs.addTab(admong_w, "🤖 자동")
+
         manual_w = QWidget()
         self._build_manual_tab(manual_w)
         self._upload_tabs.addTab(manual_w, "✍️ 수동 업로드")
 
-        admong_w = QWidget()
-        self._build_admong_tab(admong_w)
-        self._upload_tabs.addTab(admong_w, "🤖 애드몽 퍼플렉시티")
-
+        # 형태소 분석에서 받은 내용 표시 영역
+        self._received_bar = QLabel("")
+        self._received_bar.setWordWrap(True)
+        self._received_bar.setStyleSheet(
+            "background:#1a3a2a; color:#7fffb0; font-size:12px; padding:6px; border-radius:4px;")
+        self._received_bar.setVisible(False)
+        outer.addWidget(self._received_bar)
         outer.addWidget(self._upload_tabs, 1)
+
+    def _show_received(self, title, body):
+        preview = body[:120].replace('\n', ' ')
+        self._received_bar.setText(
+            f"📨 형태소 분석에서 받은 내용 | 제목: {title or '(없음)'} | 본문 미리보기: {preview}…")
+        self._received_bar.setVisible(True)
 
     def _build_manual_tab(self, parent):
         root = QVBoxLayout(parent)
