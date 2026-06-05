@@ -13637,6 +13637,11 @@ class AgencyMorphologyPage(_AgencyStateMixin, QWidget):
                 if target_tab == 1:  # 수동 탭
                     if title_to_send: upload_page.title_input.setText(title_to_send)
                     if body_to_send:  upload_page.body_editor.setPlainText(body_to_send)
+                else:  # 자동 탭 (애드몽) — 키워드 테이블에 행 추가
+                    kw = self._analysis_keyword or self.search_kw.text().strip()
+                    if kw:
+                        upload_page._adm_add_row(kw, body_to_send[:200] if body_to_send else '', '')
+                        self.main.log(f"📋 자동 탭 키워드 행 추가: {kw}")
                 # 수신 내용 미리보기 표시
                 upload_page._show_received(title_to_send, body_to_send)
                 self.main.log(f"🚀 업로드 {'자동' if target_tab==0 else '수동'} 탭으로 전송 완료")
@@ -14111,19 +14116,21 @@ class AgencyUploadPage(_AgencyStateMixin, QWidget):
         self._build_manual_tab(manual_w)
         self._upload_tabs.addTab(manual_w, "✍️ 수동 업로드")
 
-        # 형태소 분석에서 받은 내용 표시 영역
+        # 형태소 분석에서 받은 내용 표시 영역 (탭 위, 항상 보임)
         self._received_bar = QLabel("")
         self._received_bar.setWordWrap(True)
         self._received_bar.setStyleSheet(
-            "background:#1a3a2a; color:#7fffb0; font-size:12px; padding:6px; border-radius:4px;")
+            "background:#1a3a2a; color:#7fffb0; font-size:12px; padding:8px; "
+            "border:1px solid #3a7a5a; border-radius:4px; margin-bottom:4px;")
         self._received_bar.setVisible(False)
         outer.addWidget(self._received_bar)
         outer.addWidget(self._upload_tabs, 1)
 
     def _show_received(self, title, body):
-        preview = body[:120].replace('\n', ' ')
+        preview = body[:150].replace('\n', ' ')
         self._received_bar.setText(
-            f"📨 형태소 분석에서 받은 내용 | 제목: {title or '(없음)'} | 본문 미리보기: {preview}…")
+            f"📨 형태소 분석 수신 완료  ·  제목: <b>{title or '(없음)'}</b>  ·  본문: {preview}…\n"
+            f"[수동 탭: 제목/본문 자동 입력됨]  [자동 탭: 키워드 행에 추가됨]")
         self._received_bar.setVisible(True)
 
     def _build_manual_tab(self, parent):
