@@ -13530,7 +13530,48 @@ class AgencyMorphologyPage(_AgencyStateMixin, QWidget):
         splitter.addWidget(right_w)
 
         splitter.setSizes([550, 450])
-        root.addWidget(splitter, 1)
+        root.addWidget(splitter, 2)
+
+        # ── 미리보기 패널 (행 클릭 시 표시) ──
+        prev_lbl = QLabel("🔍 미리보기 (제목·URL 행 클릭)")
+        prev_lbl.setStyleSheet("color:#aaa; font-size:12px; margin-top:4px;")
+        root.addWidget(prev_lbl)
+        self.preview_box = QTextBrowser()
+        self.preview_box.setOpenExternalLinks(True)
+        self.preview_box.setMaximumHeight(160)
+        self.preview_box.setStyleSheet("background:#1a1a1a; color:#ddd; font-size:12px; border:1px solid #333;")
+        root.addWidget(self.preview_box)
+
+        # 행 클릭 → 미리보기
+        self.title_table.cellClicked.connect(lambda r, c: self._show_preview(r))
+        self.body_table.cellClicked.connect(self._on_body_cell_clicked)
+
+    def _show_preview(self, row):
+        if row >= len(self._analysis_data): return
+        it = self._analysis_data[row]
+        url = it.get('url', '')
+        title = it.get('title', '') or '(제목 없음)'
+        preview = it.get('body_preview', '')
+        kw_freq = it.get('keyword_freq', 0)
+        imgs = it.get('image_count', 0)
+        tags = ', '.join(it.get('tags', [])[:10])
+        html = (
+            f"<b style='color:#FFD700;'>{row+1}. {title}</b><br>"
+            f"<a href='{url}' style='color:#4fc3f7;'>{url}</a><br>"
+            f"<span style='color:#aaa; font-size:11px;'>키워드 {kw_freq}회 · 이미지 {imgs}장"
+            + (f" · 태그: {tags}" if tags else "") + "</span><hr>"
+            f"<span style='color:#ccc;'>{preview[:600].replace(chr(10),' ')}...</span>"
+        )
+        self.preview_box.setHtml(html)
+
+    def _on_body_cell_clicked(self, row, col):
+        self._show_preview(row)
+        if col == 0 and row < len(self._analysis_data):
+            url = self._analysis_data[row].get('url', '')
+            if url:
+                from PyQt6.QtGui import QDesktopServices
+                from PyQt6.QtCore import QUrl
+                QDesktopServices.openUrl(QUrl(url))
 
     def _copy_all(self):
         lines = []
@@ -13658,6 +13699,7 @@ class AgencyMorphologyPage(_AgencyStateMixin, QWidget):
                     'image_count': len(imgs), 'video_count': len(vids),
                     'map_count': map_count, 'tags': tags,
                     'body_length': len(body_text),
+                    'body_preview': body_text[:1000],
                 })
             except Exception as e:
                 results.append({'url': url, 'title': '', 'error': str(e)})
@@ -13686,7 +13728,10 @@ class AgencyMorphologyPage(_AgencyStateMixin, QWidget):
         self.body_table.setRowCount(len(items))
         total_kw = total_img = total_vid = total_map = 0
         for i, it in enumerate(items):
-            self.body_table.setItem(i, 0, QTableWidgetItem(it.get('url', '')))
+            url_item = QTableWidgetItem(it.get('url', ''))
+            url_item.setForeground(__import__('PyQt6.QtGui', fromlist=['QColor']).QColor('#4fc3f7'))
+            url_item.setToolTip("클릭 → 브라우저에서 열기")
+            self.body_table.setItem(i, 0, url_item)
             self.body_table.setItem(i, 1, QTableWidgetItem(str(it.get('keyword_freq', 0))))
             self.body_table.setItem(i, 2, QTableWidgetItem(str(it.get('image_count', 0))))
             self.body_table.setItem(i, 3, QTableWidgetItem(str(it.get('video_count', 0))))
