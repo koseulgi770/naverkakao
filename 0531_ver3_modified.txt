@@ -13483,36 +13483,108 @@ class AgencyMorphologyPage(_AgencyStateMixin, QWidget):
         in_lay.addWidget(self.run_btn)
         root.addWidget(in_g)
 
-        self.tabs = _QTabWidget_Agency()
+        # 좌우 분할: 제목 분석 | 본문 분석
+        splitter = QSplitter(Qt.Orientation.Horizontal)
 
-        # 제목 탭
-        tt = QWidget(); tl = QVBoxLayout(tt)
-        tl.addWidget(QLabel("📝 분석된 제목들"))
+        # ── 왼쪽: 제목 분석 ──
+        left_w = QWidget(); left_l = QVBoxLayout(left_w)
+        left_l.setContentsMargins(0, 0, 4, 0)
+        left_l.addWidget(QLabel("📝 분석된 제목들"))
         self.title_table = QTableWidget(0, 3)
         self.title_table.setHorizontalHeaderLabels(["제목", "키워드 위치", "패턴"])
         self.title_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        tl.addWidget(self.title_table, 1)
-        tl.addWidget(QLabel("✨ SEO 최적화 제목 5개 (GPT 생성)"))
-        self.seo_titles = QTextEdit(); self.seo_titles.setMaximumHeight(140)
-        tl.addWidget(self.seo_titles)
+        left_l.addWidget(self.title_table, 2)
+        left_l.addWidget(QLabel("✨ SEO 최적화 제목 5개 (GPT 생성)"))
+        self.seo_titles = QTextEdit(); self.seo_titles.setMaximumHeight(130)
+        left_l.addWidget(self.seo_titles)
         self.gen_titles_btn = QPushButton("🪄 GPT로 SEO 제목 5개 생성")
         self.gen_titles_btn.clicked.connect(self.gen_seo_titles)
         self.gen_titles_btn.setEnabled(False)
-        tl.addWidget(self.gen_titles_btn)
-        self.tabs.addTab(tt, "📝 제목 분석")
+        left_l.addWidget(self.gen_titles_btn)
 
-        # 본문 탭
-        bt = QWidget(); bl = QVBoxLayout(bt)
+        # 복사 / 업로드로 보내기 버튼
+        action_row = QHBoxLayout()
+        self.copy_all_btn = QPushButton("📋 제목+분석 복사")
+        self.copy_all_btn.clicked.connect(self._copy_all)
+        self.copy_all_btn.setEnabled(False)
+        self.send_upload_btn = QPushButton("🚀 업로드 탭으로 보내기")
+        self.send_upload_btn.clicked.connect(self._send_to_upload)
+        self.send_upload_btn.setEnabled(False)
+        action_row.addWidget(self.copy_all_btn)
+        action_row.addWidget(self.send_upload_btn)
+        left_l.addLayout(action_row)
+        splitter.addWidget(left_w)
+
+        # ── 오른쪽: 본문 분석 ──
+        right_w = QWidget(); right_l = QVBoxLayout(right_w)
+        right_l.setContentsMargins(4, 0, 0, 0)
+        right_l.addWidget(QLabel("📰 본문 분석"))
         self.body_summary = QLabel("아직 분석되지 않음")
         self.body_summary.setStyleSheet("font-size:13px; padding:8px;")
         self.body_summary.setWordWrap(True)
-        bl.addWidget(self.body_summary)
+        right_l.addWidget(self.body_summary)
         self.body_table = QTableWidget(0, 6)
         self.body_table.setHorizontalHeaderLabels(["URL", "키워드 빈도", "이미지", "영상", "지도", "해시태그"])
         self.body_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        bl.addWidget(self.body_table, 1)
-        self.tabs.addTab(bt, "📰 본문 분석")
-        root.addWidget(self.tabs, 1)
+        right_l.addWidget(self.body_table, 1)
+        splitter.addWidget(right_w)
+
+        splitter.setSizes([550, 450])
+        root.addWidget(splitter, 1)
+
+    def _copy_all(self):
+        lines = []
+        kw = self._analysis_keyword or self.search_kw.text().strip()
+        lines.append(f"[형태소 분석] 키워드: {kw}")
+        lines.append("")
+        lines.append("■ 상위글 제목")
+        for i in range(self.title_table.rowCount()):
+            t = self.title_table.item(i, 0)
+            pos = self.title_table.item(i, 1)
+            pat = self.title_table.item(i, 2)
+            if t:
+                lines.append(f"  {i+1}. {t.text()}  [{pos.text() if pos else ''}] {pat.text() if pat else ''}")
+        seo = self.seo_titles.toPlainText().strip()
+        if seo:
+            lines.append("")
+            lines.append("■ SEO 제목 추천")
+            for line in seo.splitlines():
+                if line.strip():
+                    lines.append(f"  {line.strip()}")
+        QApplication.clipboard().setText("\n".join(lines))
+        self.main.log("📋 제목+분석 클립보드에 복사됨")
+
+    def _send_to_upload(self):
+        seo = self.seo_titles.toPlainText().strip()
+        titles = [it.get('title', '') for it in self._analysis_data if it.get('title')]
+        title_to_send = ''
+        if seo:
+            title_to_send = seo.splitlines()[0].strip().lstrip('0123456789.-) ')
+        elif titles:
+            title_to_send = titles[0]
+        body_to_send = seo if seo else "\n".join(titles)
+        try:
+            # AgencyCategoryPage는 self의 부모 위젯
+            agency_page = None
+            w = self.parent()
+            while w is not None:
+                if isinstance(w, AgencyCategoryPage):
+                    agency_page = w; break
+                w = w.parent()
+            if agency_page is None:
+                self.main.log("⚠️ 대행/후기성 페이지를 찾을 수 없습니다"); return
+            agency_page._switch('agency_upload')
+            upload_page = agency_page._page_cache.get('agency_upload')
+            if upload_page:
+                if title_to_send:
+                    upload_page.title_input.setText(title_to_send)
+                if body_to_send:
+                    upload_page.body_editor.setPlainText(body_to_send)
+                self.main.log("🚀 업로드 탭으로 제목+내용 전송 완료")
+            else:
+                self.main.log("⚠️ 업로드 페이지를 열 수 없습니다")
+        except Exception as e:
+            self.main.log(f"⚠️ 업로드 탭 전송 실패: {e}")
 
     def run_analysis(self):
         kw = self.search_kw.text().strip()
@@ -13632,6 +13704,8 @@ class AgencyMorphologyPage(_AgencyStateMixin, QWidget):
             f"영상 {total_vid/n:.1f}개 · 지도 {total_map/n:.1f}개"
         )
         self.gen_titles_btn.setEnabled(True)
+        self.copy_all_btn.setEnabled(True)
+        self.send_upload_btn.setEnabled(True)
         self.main.log(f"✅ 형태소 분석: {n}개 글")
         # 분석 결과 즉시 저장
         self._analysis_keyword = keyword
