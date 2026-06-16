@@ -1,6 +1,19 @@
 {
-  "naver_client_id": "여기에_Client_ID_입력",
-  "naver_client_secret": "여기에_Client_Secret_입력",
+  "naver_client_id": "여기에_스마트스토어_Client_ID_입력",
+  "naver_client_secret": "여기에_스마트스토어_Client_Secret_입력",
   "kakao_room_name": "여기에_오픈채팅방_이름_입력",
-  "check_interval_minutes": 10
+  "check_interval_minutes": 10,
+
+  "claude_api_key": "",
+
+  "naver_blog_client_id": "",
+  "naver_blog_client_secret": "",
+
+  "blogger_client_id": "",
+  "blogger_client_secret": "",
+  "blogger_blog_id": "",
+
+  "wp_site_url": "",
+  "wp_username": "",
+  "wp_app_password": ""
 }
