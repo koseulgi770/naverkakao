@@ -1,0 +1,21 @@
+{
+  "naver_id": "",
+  "naver_pw": "",
+  "use_comment": true,
+  "use_neighbor": true,
+  "use_like": true,
+  "neighbor_group": "서로이웃",
+  "neighbor_message": "좋은 글 잘 봤습니다! 이웃해요~!",
+  "comment_mode": "manual",
+  "manual_comments": ["좋은 글 잘보고 갑니다! 즐거운 하루 되세요~"],
+  "openai_api_key": "",
+  "ai_prompt": "상냥한 말투 / 10~20자내외로 생성 / 이모티콘 없이 / 자연스러운 댓글",
+  "ai_fallback": "좋은 글 감사합니다~",
+  "keyword": "",
+  "sort_order": "latest",
+  "collect_count": 5,
+  "start_time": "09:00",
+  "end_time": "22:00",
+  "min_interval": 30,
+  "max_interval": 90
+}
