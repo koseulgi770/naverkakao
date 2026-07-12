@@ -36,6 +36,7 @@ DEFAULT_CONFIG = {
     "check_interval_minutes": 30,
     "lilys_folder_name": "",
     "max_fetch_count": 10,
+    "lilys_report_name": "",
     "chrome_profile_dir": os.path.join(BASE_DIR, "chrome_profile"),
     "publish_mode": "publish",  # "publish"(즉시 발행) 또는 "draft"(임시저장)
 }
@@ -866,8 +867,69 @@ def fetch_collection_notes(browser: Browser, log,
         _dump_debug(driver, log)
     return notes
 
-def fetch_note_content(browser: Browser, note_url: str, log) -> tuple[str, str]:
-    """노트 페이지에서 (제목, 본문 텍스트)를 추출한다."""
+def _click_report_tab(driver, report_name: str, log) -> bool:
+    """
+    노트 페이지에서 지정한 이름의 탭/확장 리포트를 클릭한다.
+    (예: '블로그_글+제목', '스크립트' 등 미리 생성해 둔 확장 리포트)
+    """
+    from selenium.webdriver.common.by import By
+
+    def _try_click(name: str) -> bool:
+        for el in driver.find_elements(
+                By.XPATH, f"//*[contains(normalize-space(text()), '{name}')]"):
+            try:
+                if el.is_displayed():
+                    # '추가' 버튼이 있는 생성 팝업 안이면 건너뜀 (새 리포트 생성 방지)
+                    driver.execute_script(
+                        "arguments[0].scrollIntoView({block:'center'});", el)
+                    time.sleep(0.3)
+                    el.click()
+                    time.sleep(4)
+                    return True
+            except Exception:
+                continue
+        return False
+
+    # 1) 화면에 이미 해당 탭이 보이면 바로 클릭
+    if _try_click(report_name):
+        log(f"📑 '{report_name}' 탭을 열었습니다")
+        return True
+
+    # 2) '확장' 메뉴를 눌러 목록을 펼친 뒤 다시 시도
+    for menu in ("확장", "리포트"):
+        try:
+            for el in driver.find_elements(
+                    By.XPATH, f"//*[normalize-space(text())='{menu}']"):
+                if el.is_displayed():
+                    el.click()
+                    time.sleep(2)
+                    break
+        except Exception:
+            continue
+        if _try_click(report_name):
+            log(f"📑 '{menu}' 메뉴에서 '{report_name}' 리포트를 열었습니다")
+            return True
+        # 실수로 생성 팝업이 열렸으면 취소 클릭
+        try:
+            for el in driver.find_elements(
+                    By.XPATH, "//*[normalize-space(text())='취소']"):
+                if el.is_displayed():
+                    el.click()
+                    time.sleep(1)
+                    break
+        except Exception:
+            pass
+
+    log(f"⚠️ '{report_name}' 탭/리포트를 찾지 못해 기본 요약을 가져옵니다. "
+        "(Lilys에서 해당 확장 리포트를 먼저 생성해 두어야 합니다)")
+    return False
+
+def fetch_note_content(browser: Browser, note_url: str, log,
+                       report_name: str = "") -> tuple[str, str]:
+    """
+    노트 페이지에서 (제목, 본문 텍스트)를 추출한다.
+    report_name 이 지정되면 해당 탭(확장 리포트)을 클릭한 뒤 내용을 가져온다.
+    """
     from selenium.webdriver.common.by import By
 
     driver = browser.get_driver()
@@ -879,6 +941,9 @@ def fetch_note_content(browser: Browser, note_url: str, log) -> tuple[str, str]:
         title = driver.find_element(By.CSS_SELECTOR, "h1").text.strip()
     except Exception:
         pass
+
+    if report_name:
+        _click_report_tab(driver, report_name, log)
 
     body = ""
     for css in ("article", "main", "body"):
@@ -955,7 +1020,8 @@ class Worker:
             try:
                 self.log(f"▶ Lilys 노트 가져오기: {note_url}")
                 browser = self._get_browser(cfg)
-                title, body = fetch_note_content(browser, note_url, self.log)
+                title, body = fetch_note_content(browser, note_url, self.log,
+                        report_name=cfg.get("lilys_report_name", ""))
                 if not body or len(body) < 100:
                     self.log("❌ 노트 본문을 가져오지 못했습니다. Lilys 로그인 상태와 링크를 확인해 주세요.")
                     return
@@ -1026,7 +1092,8 @@ class Worker:
                 for url, list_title in notes:
                     self.log(f"▶ 노트 발행 시작: {list_title}")
                     _set(url, "진행중")
-                    title, body = fetch_note_content(browser, url, self.log)
+                    title, body = fetch_note_content(browser, url, self.log,
+                        report_name=cfg.get("lilys_report_name", ""))
                     if not body or len(body) < 100:
                         self.log(f"⚠️ 본문 추출 실패, 건너뜁니다: {list_title}")
                         _set(url, "실패")
@@ -1059,7 +1126,8 @@ class Worker:
             try:
                 self.log(f"🔎 미리보기 불러오는 중: {fallback_title}")
                 browser = self._get_browser(cfg)
-                title, body = fetch_note_content(browser, url, self.log)
+                title, body = fetch_note_content(browser, url, self.log,
+                        report_name=cfg.get("lilys_report_name", ""))
                 on_ready(title or fallback_title,
                          body or "(본문을 가져오지 못했습니다)")
             except Exception as e:
@@ -1141,7 +1209,8 @@ class Worker:
                             if url in posted:
                                 continue
                             self.log(f"🆕 새 노트 발견: {list_title}")
-                            title, body = fetch_note_content(browser, url, self.log)
+                            title, body = fetch_note_content(browser, url, self.log,
+                        report_name=cfg.get("lilys_report_name", ""))
                             if not body or len(body) < 100:
                                 self.log("⚠️ 본문 추출 실패, 다음 주기에 다시 시도합니다.")
                                 continue
@@ -1214,6 +1283,7 @@ class App(tk.Tk):
             ("check_interval_minutes", "라이브러리 체크 주기 (분)", False),
             ("lilys_folder_name",      "라이브러리 폴더 이름 (비우면 전체)", False),
             ("max_fetch_count",        "가져올 노트 개수 (최대)", False),
+            ("lilys_report_name",      "가져올 확장 리포트 이름 (비우면 요약)", False),
             ("chrome_profile_dir",     "크롬 프로필 폴더",      False),
             ("publish_mode",           "발행 방식 (publish / draft)", False),
         ]
