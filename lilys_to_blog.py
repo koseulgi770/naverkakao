@@ -35,6 +35,7 @@ DEFAULT_CONFIG = {
     "result_language": "ko",
     "check_interval_minutes": 30,
     "lilys_folder_name": "",
+    "max_fetch_count": 10,
     "chrome_profile_dir": os.path.join(BASE_DIR, "chrome_profile"),
     "publish_mode": "publish",  # "publish"(즉시 발행) 또는 "draft"(임시저장)
 }
@@ -52,6 +53,14 @@ def load_config() -> dict:
 def save_config(cfg: dict):
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
         json.dump(cfg, f, ensure_ascii=False, indent=2)
+
+def _cfg_int(cfg: dict, key: str, default: int) -> int:
+    """설정값을 안전하게 정수로 읽는다."""
+    try:
+        n = int(str(cfg.get(key, default)).strip())
+        return n if n > 0 else default
+    except Exception:
+        return default
 
 def load_posted() -> set:
     if os.path.exists(POSTED_FILE):
@@ -746,10 +755,12 @@ def _wait_and_collect(driver, timeout_sec: int = 20) -> list[tuple[str, str]]:
     return notes
 
 def fetch_collection_notes(browser: Browser, log,
-                           folder_name: str = "") -> list[tuple[str, str]]:
+                           folder_name: str = "",
+                           max_notes: int = 30) -> list[tuple[str, str]]:
     """
     라이브러리(또는 보관함) 페이지에서 (노트URL, 제목) 목록을 수집한다.
     folder_name 이 지정되면 사이드바에서 해당 폴더를 클릭한 뒤 수집한다.
+    max_notes 개수만큼만 수집한다.
     """
     from selenium.webdriver.common.by import By
 
@@ -798,8 +809,9 @@ def fetch_collection_notes(browser: Browser, log,
         notes = _wait_and_collect(driver, timeout_sec=10)
         if not notes:
             # 링크가 전혀 없는 화면(클릭 카드 방식)이면 카드를 눌러가며 주소 수집
-            notes = _click_collect_notes(driver, log)
+            notes = _click_collect_notes(driver, log, max_notes=max_notes)
         if notes:
+            notes = notes[:max_notes]
             break
         log(f"ℹ️ {driver.current_url} 에서 노트를 찾지 못해 다음 경로를 시도합니다...")
 
@@ -906,7 +918,8 @@ class Worker:
                 self.log("📥 라이브러리 목록을 불러오는 중...")
                 browser = self._get_browser(cfg)
                 notes = fetch_collection_notes(
-                    browser, self.log, cfg.get("lilys_folder_name", ""))
+                    browser, self.log, cfg.get("lilys_folder_name", ""),
+                    max_notes=_cfg_int(cfg, "max_fetch_count", 10))
                 if notes:
                     self.log(f"🔍 라이브러리에서 노트 {len(notes)}개를 찾았습니다")
                     on_done(notes)
@@ -1034,7 +1047,8 @@ class Worker:
                 try:
                     browser = self._get_browser(cfg)
                     notes = fetch_collection_notes(
-                        browser, self.log, cfg.get("lilys_folder_name", ""))
+                        browser, self.log, cfg.get("lilys_folder_name", ""),
+                        max_notes=_cfg_int(cfg, "max_fetch_count", 10))
                     self.log(f"🔍 라이브러리 노트 {len(notes)}개 확인")
 
                     if first_scan and notes:
@@ -1123,6 +1137,7 @@ class App(tk.Tk):
             ("result_language",        "요약 언어 (ko / en)",   False),
             ("check_interval_minutes", "라이브러리 체크 주기 (분)", False),
             ("lilys_folder_name",      "라이브러리 폴더 이름 (비우면 전체)", False),
+            ("max_fetch_count",        "가져올 노트 개수 (최대)", False),
             ("chrome_profile_dir",     "크롬 프로필 폴더",      False),
             ("publish_mode",           "발행 방식 (publish / draft)", False),
         ]
@@ -1209,7 +1224,7 @@ class App(tk.Tk):
         cfg = load_config()
         for k, var in self._cfg_vars.items():
             val = var.get().strip()
-            cfg[k] = int(val) if k == "check_interval_minutes" and val.isdigit() else val
+            cfg[k] = int(val) if k in ("check_interval_minutes", "max_fetch_count") and val.isdigit() else val
         save_config(cfg)
         self._append_log("💾 설정이 저장되었습니다")
         return cfg
