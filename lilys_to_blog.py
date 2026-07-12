@@ -353,21 +353,74 @@ def post_to_naver_blog(browser: Browser, title: str, content: str,
 # ──────────────────────────────────────────────
 # Lilys 라이브러리(콜렉션) 감시
 # ──────────────────────────────────────────────
+# 노트로 보이는 링크 경로 패턴 (넓게 잡고 메뉴성 경로는 제외)
+_NOTE_HREF_PAT = re.compile(r"/(notes?|digest|summar\w*|videos?|contents?)(/|\?)", re.I)
+_EXCLUDE_PATHS = ("/library", "/collections", "/pricing", "/api", "/signin",
+                  "/login", "/subscribe", "/now", "/highlight", "/home")
+
 def _collect_note_links(driver) -> list[tuple[str, str]]:
     """현재 페이지에서 (노트URL, 제목) 링크들을 수집한다."""
     from selenium.webdriver.common.by import By
 
     notes, seen = [], set()
-    for a in driver.find_elements(By.CSS_SELECTOR, "a[href*='/notes/'], a[href*='/digest/']"):
+    for a in driver.find_elements(By.TAG_NAME, "a"):
         try:
             href = a.get_attribute("href") or ""
-            text = (a.text or "").strip().split("\n")
-            title = max(text, key=len) if text else ""
-            if href and href not in seen and title:
-                seen.add(href)
-                notes.append((href, title))
+            if not href or "lilys.ai" not in href or href in seen:
+                continue
+            path = href.split("lilys.ai", 1)[1]
+            if not _NOTE_HREF_PAT.search(path):
+                continue
+            if any(path.rstrip("/").endswith(p) for p in _EXCLUDE_PATHS):
+                continue
+            lines = [ln.strip() for ln in (a.text or "").splitlines() if ln.strip()]
+            title = max(lines, key=len) if lines else ""
+            if len(title) < 5:
+                continue
+            seen.add(href)
+            notes.append((href, title))
         except Exception:
             continue
+    return notes
+
+def _dump_debug(driver, log):
+    """노트를 못 찾았을 때 화면 구조를 파일로 저장해 원인 분석을 돕는다."""
+    from selenium.webdriver.common.by import By
+    try:
+        lines = [f"URL: {driver.current_url}", f"TITLE: {driver.title}", "", "[페이지의 모든 링크]"]
+        seen = set()
+        for a in driver.find_elements(By.TAG_NAME, "a"):
+            try:
+                href = a.get_attribute("href") or ""
+                text = (a.text or "").strip().replace("\n", " / ")[:80]
+                if href and href not in seen:
+                    seen.add(href)
+                    lines.append(f"{href}  |  {text}")
+            except Exception:
+                continue
+        txt_path = os.path.join(BASE_DIR, "lilys_debug.txt")
+        with open(txt_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines))
+        with open(os.path.join(BASE_DIR, "lilys_debug.html"), "w", encoding="utf-8") as f:
+            f.write(driver.page_source)
+        log(f"🛠 진단 파일을 저장했습니다: {txt_path}")
+        log("   (노트를 계속 못 찾으면 이 파일 내용을 보여주세요. 화면 구조에 맞춰 수정할 수 있습니다)")
+    except Exception as e:
+        log(f"⚠️ 진단 파일 저장 실패: {e}")
+
+def _wait_and_collect(driver, timeout_sec: int = 20) -> list[tuple[str, str]]:
+    """페이지 로딩/무한스크롤을 고려해 노트 링크가 나올 때까지 기다리며 수집한다."""
+    deadline = time.time() + timeout_sec
+    notes = []
+    while time.time() < deadline:
+        notes = _collect_note_links(driver)
+        if notes:
+            break
+        try:
+            driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+        except Exception:
+            pass
+        time.sleep(2)
     return notes
 
 def fetch_collection_notes(browser: Browser, log,
@@ -381,13 +434,26 @@ def fetch_collection_notes(browser: Browser, log,
     driver = browser.get_driver()
     notes = []
     # 라이브러리 → 보관함 순으로 시도 (Lilys 화면 구성에 따라 다름)
-    for url in ("https://lilys.ai/library", "https://lilys.ai/collections"):
+    for url in ("https://lilys.ai/library", "https://lilys.ai/collections", "https://lilys.ai/"):
         driver.get(url)
         time.sleep(6)
 
-        if "signin" in driver.current_url or "login" in driver.current_url:
+        cur = driver.current_url
+        if "signin" in cur or "login" in cur or "auth" in cur:
             log("❌ Lilys AI 로그인이 필요합니다. [로그인용 브라우저 열기]로 먼저 로그인해 주세요.")
             return []
+
+        # 홈으로 온 경우 사이드바의 '라이브러리' 메뉴 클릭 시도
+        if url.rstrip("/").endswith("lilys.ai"):
+            for el in driver.find_elements(
+                    By.XPATH, "//*[normalize-space(text())='라이브러리' or normalize-space(text())='Library']"):
+                try:
+                    if el.is_displayed():
+                        el.click()
+                        time.sleep(4)
+                        break
+                except Exception:
+                    continue
 
         # 특정 폴더만 가져오도록 설정한 경우 사이드바에서 폴더 클릭
         if folder_name:
@@ -407,9 +473,13 @@ def fetch_collection_notes(browser: Browser, log,
             else:
                 log(f"⚠️ '{folder_name}' 폴더를 찾지 못했습니다. 전체 목록에서 수집합니다.")
 
-        notes = _collect_note_links(driver)
+        notes = _wait_and_collect(driver)
         if notes:
             break
+        log(f"ℹ️ {driver.current_url} 에서 노트를 찾지 못해 다음 경로를 시도합니다...")
+
+    if not notes:
+        _dump_debug(driver, log)
     return notes
 
 def fetch_note_content(browser: Browser, note_url: str, log) -> tuple[str, str]:
