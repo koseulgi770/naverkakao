@@ -28,6 +28,8 @@ CONFIG_FILE = os.path.join(BASE_DIR, "lilys_config.json")
 POSTED_FILE = os.path.join(BASE_DIR, "posted_notes.json")
 
 DEFAULT_CONFIG = {
+    "naver_id": "",
+    "naver_pw": "",
     "lilys_api_key": "",
     "model_type": "gpt-4",
     "result_language": "ko",
@@ -256,17 +258,43 @@ class Browser:
                 pass
             self.driver = None
 
-def paste_text(driver, element, text: str):
+def safe_hotkey(driver, *keys):
+    """단축키 입력 (ActionChains 전용, 스레드 안전)."""
+    from selenium.webdriver.common.keys import Keys
+    from selenium.webdriver.common.action_chains import ActionChains
+
+    key_map = {"ctrl": Keys.CONTROL, "shift": Keys.SHIFT, "alt": Keys.ALT,
+               "enter": Keys.ENTER}
+    actions = ActionChains(driver)
+    for k in keys[:-1]:
+        actions = actions.key_down(key_map.get(k, k))
+    actions = actions.send_keys(key_map.get(keys[-1], keys[-1]))
+    for k in keys[:-1]:
+        actions = actions.key_up(key_map.get(k, k))
+    actions.perform()
+
+def safe_press(driver, key):
+    from selenium.webdriver.common.keys import Keys
+    from selenium.webdriver.common.action_chains import ActionChains
+    key_map = {"enter": Keys.ENTER, "tab": Keys.TAB, "escape": Keys.ESCAPE}
+    ActionChains(driver).send_keys(key_map.get(key, key)).perform()
+
+def paste_text(driver, element, text: str, clear: bool = False):
     """클립보드 붙여넣기로 입력한다 (이모지 등 non-BMP 문자, 보안 입력 대응)."""
     import pyperclip
-    from selenium.webdriver.common.action_chains import ActionChains
-    from selenium.webdriver.common.keys import Keys
 
-    element.click()
-    time.sleep(0.5)
+    try:
+        element.click()
+    except Exception:
+        from selenium.webdriver.common.action_chains import ActionChains
+        ActionChains(driver).move_to_element(element).click().perform()
+    time.sleep(0.3)
+    if clear:
+        safe_hotkey(driver, "ctrl", "a")
+        time.sleep(0.1)
     pyperclip.copy(text)
-    ActionChains(driver).key_down(Keys.CONTROL).send_keys("v").key_up(Keys.CONTROL).perform()
-    time.sleep(0.8)
+    safe_hotkey(driver, "ctrl", "v")
+    time.sleep(0.4)
 
 def _click_if_exists(driver, css: str) -> bool:
     from selenium.webdriver.common.by import By
@@ -280,75 +308,264 @@ def _click_if_exists(driver, css: str) -> bool:
         pass
     return False
 
-def post_to_naver_blog(browser: Browser, title: str, content: str,
-                       publish_mode: str, log) -> bool:
+def _dismiss_editor_popups(driver):
+    """작성 중이던 글 팝업 / 도움말 패널 등을 닫는다."""
+    for css in ("button.se-popup-button-cancel", ".se-popup-button-cancel",
+                "button.se-cancel", "button.se-help-panel-close-button"):
+        _click_if_exists(driver, css)
+
+def ensure_naver_login(driver, cfg, log) -> bool:
+    """
+    네이버 로그인 상태를 확인하고, 필요하면 설정의 ID/PW로 자동 로그인한다.
+    자동 로그인이 실패하면 60초간 수동 로그인을 기다린다.
+    """
+    from selenium.webdriver.common.by import By
+
+    # 이미 로그인 상태인지 쿠키로 확인
+    try:
+        driver.get("https://www.naver.com")
+        time.sleep(2)
+        if any(c["name"] in ("NID_AUT", "NID_SES") for c in driver.get_cookies()):
+            log("✅ 네이버 로그인 상태 확인됨")
+            return True
+    except Exception:
+        pass
+
+    driver.get("https://nid.naver.com/nidlogin.login")
+    time.sleep(2)
+
+    nid = (cfg.get("naver_id") or "").strip()
+    npw = (cfg.get("naver_pw") or "").strip()
+    if nid and npw:
+        try:
+            id_el = driver.find_element(By.ID, "id")
+            driver.execute_script("arguments[0].value = '';", id_el)
+            paste_text(driver, id_el, nid, clear=True)
+            pw_el = driver.find_element(By.ID, "pw")
+            driver.execute_script("arguments[0].value = '';", pw_el)
+            paste_text(driver, pw_el, npw, clear=True)
+            # 로그인 상태유지 체크
+            try:
+                keep = driver.find_element(By.ID, "keep")
+                if not keep.is_selected():
+                    keep.click()
+                    time.sleep(0.3)
+            except Exception:
+                _click_if_exists(driver, 'label[for="keep"], span.keep_text, .ip_check')
+            driver.find_element(By.ID, "log.login").click()
+            time.sleep(5)
+        except Exception as e:
+            log(f"⚠️ 자동 로그인 시도 실패: {e}")
+    else:
+        log("ℹ️ 설정에 네이버 ID/PW가 없어 수동 로그인을 기다립니다")
+
+    if "nid.naver.com" not in driver.current_url:
+        log("✅ 네이버 로그인 성공")
+        return True
+
+    # 실패 시 60초간 수동 로그인 대기 (캡차/2단계 인증 대응)
+    log("⚠️ 자동 로그인 실패 — 열린 브라우저에서 60초 안에 직접 로그인해 주세요...")
+    for remaining in range(60, 0, -5):
+        time.sleep(5)
+        if "nid.naver.com" not in driver.current_url:
+            log("✅ 수동 로그인 확인됨!")
+            return True
+        log(f"⏳ 수동 로그인 대기 중... {remaining}초 남음")
+
+    log("❌ 60초 내에 로그인되지 않았습니다")
+    return False
+
+def post_to_naver_blog(browser: Browser, cfg: dict, title: str, content: str,
+                       log) -> bool:
     """네이버 블로그 스마트에디터 ONE 에 글을 작성하고 발행/임시저장한다."""
     from selenium.webdriver.common.by import By
     from selenium.webdriver.support.ui import WebDriverWait
     from selenium.webdriver.support import expected_conditions as EC
 
     driver = browser.get_driver()
+
+    if not ensure_naver_login(driver, cfg, log):
+        return False
+
     log("🌐 네이버 블로그 글쓰기 페이지 이동 중...")
     driver.get("https://blog.naver.com/GoBlogWrite.naver")
     time.sleep(5)
 
-    if "nid.naver.com" in driver.current_url:
-        log("❌ 네이버 로그인이 필요합니다. [로그인용 브라우저 열기]로 먼저 로그인해 주세요.")
-        return False
+    # 새 탭이 열렸으면 에디터 탭만 남기기
+    handles = list(driver.window_handles)
+    if len(handles) > 1:
+        editor_tab = handles[-1]
+        for h in handles:
+            if h != editor_tab:
+                try:
+                    driver.switch_to.window(h)
+                    driver.close()
+                except Exception:
+                    pass
+        driver.switch_to.window(editor_tab)
 
-    # 글쓰기 화면은 mainFrame iframe 안에 있음
+    # 글쓰기 화면은 mainFrame iframe 안에 있음 (없는 환경도 있음)
     try:
-        WebDriverWait(driver, 15).until(
-            EC.frame_to_be_available_and_switch_to_it((By.ID, "mainFrame")))
+        driver.switch_to.default_content()
     except Exception:
-        pass  # 일부 환경은 iframe 없이 에디터가 바로 뜸
+        pass
+    try:
+        iframe = WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.ID, "mainFrame")))
+        driver.switch_to.frame(iframe)
+        time.sleep(1)
+    except Exception:
+        log("ℹ️ mainFrame 없음, 에디터에 직접 접근합니다")
 
-    time.sleep(3)
-    # 작성 중이던 글 팝업 / 도움말 패널 닫기
-    _click_if_exists(driver, ".se-popup-button-cancel")
-    _click_if_exists(driver, "button.se-help-panel-close-button")
+    _dismiss_editor_popups(driver)
 
     try:
-        # 제목 입력
-        title_el = WebDriverWait(driver, 15).until(
+        WebDriverWait(driver, 10).until(
             EC.presence_of_element_located(
-                (By.CSS_SELECTOR, ".se-section-documentTitle .se-text-paragraph")))
-        paste_text(driver, title_el, title)
-        log("✏️ 제목 입력 완료")
+                (By.CSS_SELECTOR, 'div.se-title-text, div[contenteditable="true"]')))
+    except Exception:
+        log("⚠️ 에디터 로드가 늦습니다 (계속 시도)")
 
-        # 본문 입력
-        body_el = driver.find_element(
-            By.CSS_SELECTOR, ".se-section-text .se-text-paragraph")
-        paste_text(driver, body_el, content)
-        log("✏️ 본문 입력 완료")
-    except Exception as e:
-        log(f"❌ 에디터 입력 실패 (에디터 구조가 변경되었을 수 있음): {e}")
+    # ── 제목 입력 (여러 셀렉터 순차 시도) ──
+    title_selectors = [
+        "span.se-placeholder",
+        'div[data-name="title"] div[contenteditable="true"]',
+        "div.se-section-title div.se-text-paragraph",
+        ".se-section-documentTitle .se-text-paragraph",
+        "div.se-title-text",
+    ]
+    title_ok = False
+    for sel in title_selectors:
+        try:
+            el = WebDriverWait(driver, 3).until(
+                EC.element_to_be_clickable((By.CSS_SELECTOR, sel)))
+            paste_text(driver, el, title, clear=True)
+            title_ok = True
+            break
+        except Exception:
+            continue
+    if not title_ok:
+        log("❌ 제목 입력 실패 (에디터 구조가 변경되었을 수 있음)")
+        driver.switch_to.default_content()
+        return False
+    log(f"✏️ 제목 입력 완료: {title[:30]}")
+
+    # ── 본문 포커스 ──
+    body_selectors = [
+        'div.se-section-text div[contenteditable="true"]',
+        'div.se-component-content div[contenteditable="true"]',
+        "div.se-text-paragraph",
+        'div[contenteditable="true"]',
+    ]
+    focused = False
+    for sel in body_selectors:
+        try:
+            for el in driver.find_elements(By.CSS_SELECTOR, sel):
+                if el.is_displayed():
+                    try:
+                        driver.execute_script("arguments[0].click();", el)
+                    except Exception:
+                        el.click()
+                    time.sleep(0.3)
+                    focused = True
+                    break
+        except Exception:
+            continue
+        if focused:
+            break
+    if not focused:
+        try:
+            safe_press(driver, "tab")
+            time.sleep(0.3)
+            focused = True
+        except Exception:
+            pass
+    if not focused:
+        log("❌ 본문 영역 포커스 실패")
         driver.switch_to.default_content()
         return False
 
+    # ── 본문 입력 (한 줄씩 붙여넣기 → 문단 유지) ──
+    import pyperclip
+    wrote_any = False
+    for raw_line in content.split("\n"):
+        line = raw_line.rstrip()
+        if not line.strip():
+            safe_press(driver, "enter")
+            time.sleep(0.05)
+            continue
+        pyperclip.copy(line)
+        safe_hotkey(driver, "ctrl", "v")
+        safe_press(driver, "enter")
+        time.sleep(0.1)
+        wrote_any = True
+    if not wrote_any:
+        log("❌ 본문 내용이 비어 있습니다")
+        driver.switch_to.default_content()
+        return False
+    log("✏️ 본문 입력 완료")
+
     time.sleep(1)
+
+    # ── 발행 / 임시저장 ──
+    def _click_first(selectors, timeout=3):
+        for sel in selectors:
+            try:
+                btn = WebDriverWait(driver, timeout).until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, sel)))
+                driver.execute_script("arguments[0].click();", btn)
+                return True
+            except Exception:
+                continue
+        return False
+
     try:
-        if publish_mode == "draft":
-            # 임시저장
-            save_btn = driver.find_element(
-                By.CSS_SELECTOR, "button[class*='save_btn']")
-            save_btn.click()
+        if cfg.get("publish_mode") == "draft":
+            clicked = _click_first([
+                'button[data-testid="save-btn"]',
+                "button.save_btn__Y5f57",
+                "button.save_btn",
+                'button[class*="save"]',
+            ])
+            if not clicked:
+                try:
+                    btn = driver.find_element(
+                        By.XPATH, '//button[contains(., "임시저장")]')
+                    driver.execute_script("arguments[0].click();", btn)
+                    clicked = True
+                except Exception:
+                    pass
+            if not clicked:
+                raise RuntimeError("임시저장 버튼을 찾지 못했습니다")
             time.sleep(2)
             log("💾 임시저장 완료")
         else:
-            # 발행 버튼 → 발행 레이어의 확인 버튼
-            publish_btn = driver.find_element(
-                By.CSS_SELECTOR, "button[class*='publish_btn']")
-            publish_btn.click()
+            if not _click_first([
+                'button[data-testid="publish-btn"]',
+                "button.publish_btn__Y5f57",
+                "button.publish_btn",
+                'button[class*="publish"]',
+            ]):
+                raise RuntimeError("발행 버튼을 찾지 못했습니다")
             time.sleep(2)
-            confirm_btn = WebDriverWait(driver, 10).until(
-                EC.element_to_be_clickable(
-                    (By.CSS_SELECTOR, "button[class*='confirm_btn']")))
-            confirm_btn.click()
-            time.sleep(3)
+
+            confirm_selectors = [
+                "button.se-popup-button-confirm",
+                "button.confirm_btn__WEaBq",
+                "button.confirm_btn",
+                'button[class*="confirm"]',
+            ]
+            if not _click_first(confirm_selectors):
+                log("ℹ️ 발행 확인 팝업이 없어 바로 완료 여부를 확인합니다")
+
+            time.sleep(4)
+            if "goblogwrite" in (driver.current_url or "").lower():
+                log("⚠️ 에디터에 머물러 있어 발행을 재시도합니다...")
+                _click_first(confirm_selectors)
+                time.sleep(3)
             log("🚀 발행 완료!")
     except Exception as e:
-        log(f"❌ 발행 버튼 클릭 실패 (에디터 구조가 변경되었을 수 있음): {e}")
+        log(f"❌ 발행/저장 실패: {e}")
         driver.switch_to.default_content()
         return False
 
@@ -669,7 +886,7 @@ class Worker:
                 self.log(f"📄 노트 내용 추출 완료: {title}")
 
                 ok = post_to_naver_blog(
-                    browser, title, body, cfg["publish_mode"], self.log)
+                    browser, cfg, title, body, self.log)
                 if ok:
                     self.log("✅ 블로그 포스팅 완료")
             except Exception as e:
@@ -728,7 +945,7 @@ class Worker:
                     title = title or list_title
                     body = markdown_to_plain(body) + f"\n\n원본 노트: {url}"
                     ok = post_to_naver_blog(
-                        browser, title, body, cfg["publish_mode"], self.log)
+                        browser, cfg, title, body, self.log)
                     if ok:
                         posted.add(url)
                         save_posted(posted)
@@ -785,7 +1002,7 @@ class Worker:
 
                 browser = self._get_browser(cfg)
                 ok = post_to_naver_blog(
-                    browser, title, body, cfg["publish_mode"], self.log)
+                    browser, cfg, title, body, self.log)
                 if ok:
                     self.log("✅ 블로그 포스팅 완료")
             except Exception as e:
@@ -841,7 +1058,7 @@ class Worker:
                             title = title or list_title
                             body = markdown_to_plain(body) + f"\n\n원본 노트: {url}"
                             ok = post_to_naver_blog(
-                                browser, title, body, cfg["publish_mode"], self.log)
+                                browser, cfg, title, body, self.log)
                             if ok:
                                 posted.add(url)
                                 save_posted(posted)
@@ -880,7 +1097,7 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Lilys AI → 네이버 블로그 자동 포스팅")
-        self.geometry("720x680")
+        self.geometry("720x740")
         self.resizable(False, False)
         self.configure(bg=BG)
 
@@ -899,6 +1116,8 @@ class App(tk.Tk):
 
         self._cfg_vars = {}
         fields = [
+            ("naver_id",               "네이버 ID (자동 로그인용)", False),
+            ("naver_pw",               "네이버 비밀번호",       True),
             ("lilys_api_key",          "Lilys API Key (선택, 유튜브 직접 요약용)", True),
             ("model_type",             "요약 모델 (gpt-3.5 / gpt-4)", False),
             ("result_language",        "요약 언어 (ko / en)",   False),
