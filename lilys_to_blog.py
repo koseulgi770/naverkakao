@@ -201,6 +201,7 @@ class Browser:
         self.profile_dir = profile_dir
         self.log = log
         self.driver = None
+        self._launch_lock = threading.Lock()
 
     def _launch(self):
         from selenium import webdriver
@@ -216,6 +217,10 @@ class Browser:
         return webdriver.Chrome(options=opts)
 
     def get_driver(self):
+        with self._launch_lock:  # 동시에 두 개가 뜨지 않도록
+            return self._get_driver_locked()
+
+    def _get_driver_locked(self):
         if self.driver:
             try:
                 _ = self.driver.current_url  # 살아있는지 확인
@@ -398,6 +403,18 @@ def _dump_debug(driver, log):
                     lines.append(f"{href}  |  {text}")
             except Exception:
                 continue
+        lines += ["", "[클릭 가능한 카드 후보]"]
+        try:
+            for t in _mark_cards(driver):
+                lines.append("- " + t.replace("\n", " / ")[:120])
+        except Exception:
+            pass
+        lines += ["", "[화면 텍스트 앞부분]"]
+        try:
+            body_text = driver.execute_script("return document.body.innerText") or ""
+            lines.append(body_text[:3000])
+        except Exception:
+            pass
         txt_path = os.path.join(BASE_DIR, "lilys_debug.txt")
         with open(txt_path, "w", encoding="utf-8") as f:
             f.write("\n".join(lines))
@@ -407,6 +424,94 @@ def _dump_debug(driver, log):
         log("   (노트를 계속 못 찾으면 이 파일 내용을 보여주세요. 화면 구조에 맞춰 수정할 수 있습니다)")
     except Exception as e:
         log(f"⚠️ 진단 파일 저장 실패: {e}")
+
+# 카드(클릭으로 열리는 노트) 탐지용 JS:
+# 마우스 커서가 pointer 이고 적당한 길이의 텍스트를 가진 '가장 바깥' 요소를 찾아
+# data-lilys-card 번호를 붙이고 텍스트 목록을 반환한다.
+_MARK_CARDS_JS = """
+const cands = [...document.querySelectorAll('div, li, article, section')].filter(el => {
+    if (!el.offsetParent) return false;
+    const t = (el.innerText || '').trim();
+    if (t.length < 20 || t.length > 400) return false;
+    if (getComputedStyle(el).cursor !== 'pointer') return false;
+    return true;
+});
+const outer = cands.filter(el => !cands.some(o => o !== el && o.contains(el)));
+document.querySelectorAll('[data-lilys-card]').forEach(el => el.removeAttribute('data-lilys-card'));
+outer.forEach((el, i) => el.setAttribute('data-lilys-card', i));
+return outer.map(el => (el.innerText || '').trim());
+"""
+
+def _mark_cards(driver) -> list[str]:
+    return driver.execute_script(_MARK_CARDS_JS) or []
+
+def _looks_like_note_card(text: str) -> bool:
+    """카드 텍스트가 노트(요약 글)로 보이는지 판별한다."""
+    # 날짜(2026.07.12 형태)나 '유튜브' 표기가 있는, 어느 정도 긴 텍스트만 노트로 취급
+    return bool(re.search(r"20\d{2}[.\-/]\s?\d{1,2}[.\-/]\s?\d{1,2}", text)
+                or "유튜브" in text or "YouTube" in text.lower())
+
+def _click_collect_notes(driver, log, max_notes: int = 30) -> list[tuple[str, str]]:
+    """
+    노트 카드가 링크(<a>)가 아닌 화면에서, 카드를 하나씩 클릭해
+    이동한 주소를 수집하고 뒤로가기로 돌아온다.
+    """
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.common.keys import Keys
+
+    collected, done_titles = [], set()
+    base_url = driver.current_url
+    card_texts = _mark_cards(driver)
+    note_idxs = [i for i, t in enumerate(card_texts) if _looks_like_note_card(t)]
+    if not note_idxs:
+        return []
+    log(f"🃏 노트 카드 {len(note_idxs)}개를 발견했습니다. 하나씩 열어 주소를 수집합니다...")
+
+    for n, _ in enumerate(note_idxs[:max_notes]):
+        # 목록 화면으로 돌아올 때마다 DOM이 새로 그려지므로 카드를 다시 표시
+        texts_now = _mark_cards(driver)
+        idxs_now = [i for i, t in enumerate(texts_now)
+                    if _looks_like_note_card(t) and t not in done_titles]
+        if not idxs_now:
+            break
+        idx = idxs_now[0]
+        card_text = texts_now[idx]
+        done_titles.add(card_text)
+        try:
+            el = driver.find_element(By.CSS_SELECTOR, f"[data-lilys-card='{idx}']")
+            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
+            time.sleep(0.5)
+            el.click()
+        except Exception:
+            continue
+
+        # 주소가 바뀔 때까지 대기
+        new_url = None
+        deadline = time.time() + 8
+        while time.time() < deadline:
+            if driver.current_url != base_url:
+                new_url = driver.current_url
+                break
+            time.sleep(0.5)
+
+        if new_url:
+            lines = [ln.strip() for ln in card_text.splitlines() if ln.strip()]
+            title = max(lines, key=len) if lines else card_text[:60]
+            collected.append((new_url, title))
+            driver.back()
+            time.sleep(3)
+            # 뒤로가기 후 목록 화면이 아니면 다시 이동
+            if driver.current_url != base_url:
+                driver.get(base_url)
+                time.sleep(4)
+        else:
+            # 모달이 열렸을 수 있으니 ESC로 닫기
+            try:
+                driver.find_element(By.TAG_NAME, "body").send_keys(Keys.ESCAPE)
+                time.sleep(1)
+            except Exception:
+                pass
+    return collected
 
 def _wait_and_collect(driver, timeout_sec: int = 20) -> list[tuple[str, str]]:
     """페이지 로딩/무한스크롤을 고려해 노트 링크가 나올 때까지 기다리며 수집한다."""
@@ -473,7 +578,10 @@ def fetch_collection_notes(browser: Browser, log,
             else:
                 log(f"⚠️ '{folder_name}' 폴더를 찾지 못했습니다. 전체 목록에서 수집합니다.")
 
-        notes = _wait_and_collect(driver)
+        notes = _wait_and_collect(driver, timeout_sec=10)
+        if not notes:
+            # 링크가 전혀 없는 화면(클릭 카드 방식)이면 카드를 눌러가며 주소 수집
+            notes = _click_collect_notes(driver, log)
         if notes:
             break
         log(f"ℹ️ {driver.current_url} 에서 노트를 찾지 못해 다음 경로를 시도합니다...")
