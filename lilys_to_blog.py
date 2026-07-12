@@ -180,16 +180,42 @@ def markdown_to_plain(text: str) -> str:
 # ──────────────────────────────────────────────
 # Selenium 브라우저 (네이버 발행 + Lilys 라이브러리 감시 공용)
 # ──────────────────────────────────────────────
+def _kill_profile_chrome(profile_dir: str):
+    """이 전용 프로필을 사용 중인 크롬 프로세스를 종료한다 (Windows)."""
+    if os.name != "nt":
+        return
+    try:
+        import subprocess
+        script = (
+            "Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\" | "
+            f"Where-Object {{ $_.CommandLine -like '*{profile_dir}*' }} | "
+            "ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"
+        )
+        subprocess.run(["powershell", "-NoProfile", "-Command", script],
+                       capture_output=True, timeout=30)
+    except Exception:
+        pass
+
 class Browser:
     def __init__(self, profile_dir: str, log):
         self.profile_dir = profile_dir
         self.log = log
         self.driver = None
 
-    def get_driver(self):
+    def _launch(self):
         from selenium import webdriver
         from selenium.webdriver.chrome.options import Options
 
+        os.makedirs(self.profile_dir, exist_ok=True)
+        opts = Options()
+        opts.add_argument(f"--user-data-dir={self.profile_dir}")
+        opts.add_argument("--no-first-run")
+        opts.add_argument("--no-default-browser-check")
+        opts.add_argument("--disable-blink-features=AutomationControlled")
+        opts.add_experimental_option("excludeSwitches", ["enable-automation"])
+        return webdriver.Chrome(options=opts)
+
+    def get_driver(self):
         if self.driver:
             try:
                 _ = self.driver.current_url  # 살아있는지 확인
@@ -197,13 +223,24 @@ class Browser:
             except Exception:
                 self.driver = None
 
-        os.makedirs(self.profile_dir, exist_ok=True)
-        opts = Options()
-        opts.add_argument(f"--user-data-dir={self.profile_dir}")
-        opts.add_argument("--disable-blink-features=AutomationControlled")
-        opts.add_experimental_option("excludeSwitches", ["enable-automation"])
-        opts.add_experimental_option("detach", True)
-        self.driver = webdriver.Chrome(options=opts)
+        try:
+            self.driver = self._launch()
+        except Exception:
+            # 같은 프로필을 쓰는 크롬이 이미 떠 있으면 실행에 실패한다.
+            # 남아있는 크롬을 정리하고 한 번 더 시도한다.
+            self.log("⚠️ 크롬 실행 실패. 프로필을 사용 중인 기존 크롬 창을 정리하고 재시도합니다...")
+            _kill_profile_chrome(self.profile_dir)
+            time.sleep(3)
+            try:
+                self.driver = self._launch()
+            except Exception as e:
+                raise RuntimeError(
+                    "크롬을 시작하지 못했습니다. 다음을 확인해 주세요:\n"
+                    "  1) 열려 있는 크롬 창을 모두 닫고 다시 시도\n"
+                    "  2) 크롬(Chrome)이 설치되어 있는지 확인\n"
+                    "  3) 크롬을 최신 버전으로 업데이트\n"
+                    f"  (원본 오류: {str(e).splitlines()[0]})"
+                ) from e
         return self.driver
 
     def quit(self):
