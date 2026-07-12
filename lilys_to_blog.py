@@ -701,8 +701,15 @@ class Worker:
                 self._busy.release()
         threading.Thread(target=_run, daemon=True).start()
 
-    def post_selected_notes(self, cfg, notes: list):
-        """선택한 노트들을 순서대로 블로그에 발행한다."""
+    def post_selected_notes(self, cfg, notes: list, on_status=None):
+        """선택한 노트들을 순서대로 블로그에 발행한다. on_status(url, 상태) 콜백으로 진행을 알린다."""
+        def _set(url, status):
+            if on_status:
+                try:
+                    on_status(url, status)
+                except Exception:
+                    pass
+
         def _run():
             if not self._busy.acquire(blocking=False):
                 self.log("⚠️ 이미 작업이 진행 중입니다.")
@@ -712,9 +719,11 @@ class Worker:
                 browser = self._get_browser(cfg)
                 for url, list_title in notes:
                     self.log(f"▶ 노트 발행 시작: {list_title}")
+                    _set(url, "진행중")
                     title, body = fetch_note_content(browser, url, self.log)
                     if not body or len(body) < 100:
                         self.log(f"⚠️ 본문 추출 실패, 건너뜁니다: {list_title}")
+                        _set(url, "실패")
                         continue
                     title = title or list_title
                     body = markdown_to_plain(body) + f"\n\n원본 노트: {url}"
@@ -724,10 +733,31 @@ class Worker:
                         posted.add(url)
                         save_posted(posted)
                         self.log(f"✅ 블로그 포스팅 완료: {title}")
+                        _set(url, "완료")
+                    else:
+                        _set(url, "실패")
                     time.sleep(3)
                 self.log("🏁 선택한 노트 발행 작업이 끝났습니다")
             except Exception as e:
                 self.log(f"❌ 오류 발생: {e}")
+            finally:
+                self._busy.release()
+        threading.Thread(target=_run, daemon=True).start()
+
+    def preview_note(self, cfg, url: str, fallback_title: str, on_ready):
+        """노트 내용을 가져와 on_ready(제목, 본문) 콜백으로 전달한다 (미리보기용)."""
+        def _run():
+            if not self._busy.acquire(blocking=False):
+                self.log("⚠️ 이미 작업이 진행 중입니다. 잠시 후 다시 시도해 주세요.")
+                return
+            try:
+                self.log(f"🔎 미리보기 불러오는 중: {fallback_title}")
+                browser = self._get_browser(cfg)
+                title, body = fetch_note_content(browser, url, self.log)
+                on_ready(title or fallback_title,
+                         body or "(본문을 가져오지 못했습니다)")
+            except Exception as e:
+                self.log(f"❌ 미리보기 실패: {e}")
             finally:
                 self._busy.release()
         threading.Thread(target=_run, daemon=True).start()
@@ -998,51 +1028,161 @@ class App(tk.Tk):
             cfg, lambda notes: self.after(0, self._show_note_picker, cfg, notes))
 
     def _show_note_picker(self, cfg, notes):
-        """라이브러리 노트 목록에서 발행할 노트를 고르는 창."""
+        """라이브러리 노트 목록: 체크로 선택, 미리보기, 상태 표시가 있는 창."""
+        from tkinter import ttk
+
         win = tk.Toplevel(self)
         win.title("라이브러리에서 발행할 노트 선택")
-        win.geometry("560x460")
+        win.geometry("820x560")
         win.configure(bg=BG)
 
         posted = load_posted()
-        tk.Label(win, text="발행할 노트를 선택하세요 (Ctrl/Shift 클릭으로 여러 개 선택 가능)",
-                 bg=BG, fg=FG_DIM, font=FONT_M).pack(pady=(12, 6))
 
-        frame = tk.Frame(win, bg=BG)
-        frame.pack(fill="both", expand=True, padx=16)
-        scrollbar = tk.Scrollbar(frame)
-        scrollbar.pack(side="right", fill="y")
-        listbox = tk.Listbox(
-            frame, selectmode="extended", font=FONT_M,
-            bg=SURFACE, fg=FG, selectbackground=ACCENT,
-            relief="flat", yscrollcommand=scrollbar.set)
-        listbox.pack(side="left", fill="both", expand=True)
-        scrollbar.config(command=listbox.yview)
+        # 상단: 요약/전체선택
+        top = tk.Frame(win, bg=BG)
+        top.pack(fill="x", padx=16, pady=(12, 6))
+        count_var = tk.StringVar(value=f"글감 {len(notes)}개 · 선택 0개")
+        tk.Label(top, textvariable=count_var, bg=BG, fg=FG,
+                 font=FONT_B).pack(side="left")
+        tk.Label(top, text="  (제목 클릭=체크, 🔍=미리보기)", bg=BG, fg=FG_DIM,
+                 font=FONT_M).pack(side="left")
 
-        for url, title in notes:
-            mark = "✅ " if url in posted else ""
-            listbox.insert("end", f"{mark}{title}")
+        # 표 스타일 (다크)
+        style = ttk.Style(win)
+        style.theme_use("clam")
+        style.configure("Notes.Treeview", background=SURFACE, foreground=FG,
+                        fieldbackground=SURFACE, rowheight=30,
+                        font=FONT_M, borderwidth=0)
+        style.configure("Notes.Treeview.Heading", background="#1b1b2b",
+                        foreground=FG_DIM, font=FONT_B, borderwidth=0)
+        style.map("Notes.Treeview", background=[("selected", "#3b2d63")])
 
-        def _publish():
-            selected = [notes[i] for i in listbox.curselection()]
-            if not selected:
-                messagebox.showwarning("선택 필요", "발행할 노트를 선택해 주세요.", parent=win)
+        table_frame = tk.Frame(win, bg=BG)
+        table_frame.pack(fill="both", expand=True, padx=16)
+        cols = ("check", "num", "title", "status", "preview")
+        tree = ttk.Treeview(table_frame, columns=cols, show="headings",
+                            style="Notes.Treeview", selectmode="none")
+        tree.heading("check", text="선택")
+        tree.heading("num", text="#")
+        tree.heading("title", text="글감 (노트 제목)")
+        tree.heading("status", text="상태")
+        tree.heading("preview", text="미리보기")
+        tree.column("check", width=50, anchor="center", stretch=False)
+        tree.column("num", width=40, anchor="center", stretch=False)
+        tree.column("title", width=520, anchor="w")
+        tree.column("status", width=70, anchor="center", stretch=False)
+        tree.column("preview", width=70, anchor="center", stretch=False)
+
+        vsb = ttk.Scrollbar(table_frame, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=vsb.set)
+        tree.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+
+        checked: dict = {}      # iid -> bool
+        url_by_iid: dict = {}   # iid -> (url, title)
+        for i, (url, title) in enumerate(notes):
+            iid = str(i)
+            status = "발행됨" if url in posted else "대기"
+            tree.insert("", "end", iid=iid,
+                        values=("☐", i + 1, title, status, "🔍"))
+            checked[iid] = False
+            url_by_iid[iid] = (url, title)
+
+        def _update_count():
+            n = sum(1 for v in checked.values() if v)
+            count_var.set(f"글감 {len(notes)}개 · 선택 {n}개")
+
+        def _toggle(iid):
+            checked[iid] = not checked[iid]
+            tree.set(iid, "check", "☑" if checked[iid] else "☐")
+            _update_count()
+
+        def _show_preview(iid):
+            url, title = url_by_iid[iid]
+
+            def _on_ready(t, body):
+                def _do():
+                    pv = tk.Toplevel(win)
+                    pv.title(f"미리보기 — {t[:40]}")
+                    pv.geometry("640x560")
+                    pv.configure(bg=BG)
+                    tk.Label(pv, text=t, bg=BG, fg=FG, font=FONT_B,
+                             wraplength=600, justify="left").pack(
+                        fill="x", padx=16, pady=(12, 6))
+                    box = scrolledtext.ScrolledText(
+                        pv, bg=SURFACE, fg=FG, font=FONT_M,
+                        relief="flat", wrap="word")
+                    box.pack(fill="both", expand=True, padx=16, pady=(0, 12))
+                    box.insert("1.0", markdown_to_plain(body))
+                    box.config(state="disabled")
+                self.after(0, _do)
+
+            self._worker.preview_note(cfg, url, title, _on_ready)
+
+        def _on_click(event):
+            iid = tree.identify_row(event.y)
+            col = tree.identify_column(event.x)
+            if not iid:
                 return
-            win.destroy()
-            self._worker.post_selected_notes(cfg, selected)
+            if col == "#5":          # 미리보기
+                _show_preview(iid)
+            else:                    # 나머지 영역은 체크 토글
+                _toggle(iid)
 
+        tree.bind("<Button-1>", _on_click)
+
+        # 하단 버튼
         btns = tk.Frame(win, bg=BG)
-        btns.pack(pady=12)
-        tk.Button(btns, text="🚀 선택한 노트 발행", font=FONT_B,
-                  bg=ACCENT, fg="white", activebackground=ACCENT_H,
-                  activeforeground="white", relief="flat",
-                  padx=16, pady=6, cursor="hand2",
-                  command=_publish).pack(side="left", padx=6)
-        tk.Button(btns, text="닫기", font=FONT_B,
+        btns.pack(fill="x", pady=12, padx=16)
+
+        def _select_all():
+            all_on = all(checked.values())
+            for iid in checked:
+                checked[iid] = not all_on
+                tree.set(iid, "check", "☑" if checked[iid] else "☐")
+            _update_count()
+
+        tk.Button(btns, text="전체 선택/해제", font=FONT_B,
                   bg="#475569", fg="white", activebackground="#334155",
                   activeforeground="white", relief="flat",
-                  padx=16, pady=6, cursor="hand2",
-                  command=win.destroy).pack(side="left", padx=6)
+                  padx=12, pady=6, cursor="hand2",
+                  command=_select_all).pack(side="left")
+
+        btn_start = tk.Button(
+            btns, text="▷ 포스팅 시작", font=FONT_B,
+            bg="#16a34a", fg="white", activebackground="#15803d",
+            activeforeground="white", relief="flat",
+            padx=20, pady=6, cursor="hand2")
+        btn_start.pack(side="right")
+
+        def _on_status(url, status):
+            def _do():
+                for iid, (u, _) in url_by_iid.items():
+                    if u == url:
+                        try:
+                            tree.set(iid, "status", status)
+                        except Exception:
+                            pass
+                        break
+                if status in ("완료", "실패"):
+                    remaining = any(
+                        tree.set(i, "status") == "진행중" for i in url_by_iid)
+                    if not remaining:
+                        try:
+                            btn_start.config(state="normal", text="▷ 포스팅 시작")
+                        except Exception:
+                            pass
+            self.after(0, _do)
+
+        def _start():
+            selected = [url_by_iid[iid] for iid, on in checked.items() if on]
+            if not selected:
+                messagebox.showwarning("선택 필요", "발행할 노트를 체크해 주세요.", parent=win)
+                return
+            btn_start.config(state="disabled", text="포스팅 중...")
+            self._worker.post_selected_notes(cfg, selected, on_status=_on_status)
+
+        btn_start.config(command=_start)
 
     def _on_toggle_watch(self):
         if self._worker._watching:
