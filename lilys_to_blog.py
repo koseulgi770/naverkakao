@@ -392,6 +392,10 @@ def ensure_naver_login(driver, cfg, log) -> bool:
         pass
 
     # 실패 시 120초간 수동 로그인 대기 (캡차/2단계 인증 대응)
+    try:
+        driver.maximize_window()
+    except Exception:
+        pass
     log("⚠️ 자동 로그인 미완료 — 열린 크롬 창에서 120초 안에 직접 로그인해 주세요...")
     for remaining in range(120, 0, -5):
         time.sleep(5)
@@ -701,62 +705,85 @@ def _click_collect_notes(driver, log, max_notes: int = 30) -> list[tuple[str, st
     """
     노트 카드가 링크(<a>)가 아닌 화면에서, 카드를 하나씩 클릭해
     이동한 주소를 수집하고 뒤로가기로 돌아온다.
+    실패한 카드는 한 번 더 시도하고, 최종 수집 결과를 로그로 알린다.
     """
     from selenium.webdriver.common.by import By
     from selenium.webdriver.common.keys import Keys
 
-    collected, done_titles = [], set()
     base_url = driver.current_url
     card_texts = _mark_cards(driver)
-    note_idxs = [i for i, t in enumerate(card_texts) if _looks_like_note_card(t)]
-    if not note_idxs:
+    targets = [t for t in card_texts if _looks_like_note_card(t)][:max_notes]
+    if not targets:
         return []
-    log(f"🃏 노트 카드 {len(note_idxs)}개를 발견했습니다. 하나씩 열어 주소를 수집합니다...")
+    log(f"🃏 노트 카드 {len(targets)}개를 발견했습니다. 하나씩 열어 주소를 수집합니다...")
 
-    for n, _ in enumerate(note_idxs[:max_notes]):
-        # 목록 화면으로 돌아올 때마다 DOM이 새로 그려지므로 카드를 다시 표시
+    def _open_card(card_text):
+        """카드를 클릭해 이동한 주소를 반환. 실패하면 None."""
         texts_now = _mark_cards(driver)
-        idxs_now = [i for i, t in enumerate(texts_now)
-                    if _looks_like_note_card(t) and t not in done_titles]
-        if not idxs_now:
-            break
-        idx = idxs_now[0]
-        card_text = texts_now[idx]
-        done_titles.add(card_text)
+        idx = next((i for i, t in enumerate(texts_now) if t == card_text), None)
+        if idx is None:
+            # 시간 표기 등이 바뀌었을 수 있으니 앞부분만 매칭
+            head = card_text[:25]
+            idx = next((i for i, t in enumerate(texts_now) if t[:25] == head), None)
+        if idx is None:
+            return None
         try:
             el = driver.find_element(By.CSS_SELECTOR, f"[data-lilys-card='{idx}']")
             driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
             time.sleep(0.5)
-            el.click()
+            try:
+                el.click()
+            except Exception:
+                driver.execute_script("arguments[0].click();", el)
         except Exception:
-            continue
+            return None
 
-        # 주소가 바뀔 때까지 대기
-        new_url = None
-        deadline = time.time() + 8
+        deadline = time.time() + 10
         while time.time() < deadline:
             if driver.current_url != base_url:
                 new_url = driver.current_url
-                break
+                driver.back()
+                time.sleep(3)
+                if driver.current_url != base_url:
+                    driver.get(base_url)
+                    time.sleep(4)
+                return new_url
             time.sleep(0.5)
 
-        if new_url:
-            lines = [ln.strip() for ln in card_text.splitlines() if ln.strip()]
-            title = max(lines, key=len) if lines else card_text[:60]
-            collected.append((new_url, title))
-            driver.back()
-            time.sleep(3)
-            # 뒤로가기 후 목록 화면이 아니면 다시 이동
-            if driver.current_url != base_url:
-                driver.get(base_url)
-                time.sleep(4)
-        else:
-            # 모달이 열렸을 수 있으니 ESC로 닫기
-            try:
-                driver.find_element(By.TAG_NAME, "body").send_keys(Keys.ESCAPE)
-                time.sleep(1)
-            except Exception:
-                pass
+        # 주소가 안 바뀌었으면 모달이 열렸을 수 있으니 ESC로 닫기
+        try:
+            driver.find_element(By.TAG_NAME, "body").send_keys(Keys.ESCAPE)
+            time.sleep(1)
+        except Exception:
+            pass
+        return None
+
+    collected, seen_urls = [], set()
+    pending = list(targets)
+    for attempt in (1, 2):
+        still_failed = []
+        for card_text in pending:
+            url = _open_card(card_text)
+            if url and url not in seen_urls:
+                seen_urls.add(url)
+                lines = [ln.strip() for ln in card_text.splitlines() if ln.strip()]
+                title = max(lines, key=len) if lines else card_text[:60]
+                collected.append((url, title))
+                log(f"  ✔ 수집 {len(collected)}/{len(targets)}: {title[:40]}")
+            elif not url:
+                still_failed.append(card_text)
+        pending = still_failed
+        if not pending:
+            break
+        if attempt == 1:
+            log(f"⚠️ 카드 {len(pending)}개가 열리지 않아 한 번 더 시도합니다...")
+            driver.get(base_url)
+            time.sleep(4)
+
+    if pending:
+        for t in pending:
+            log(f"  ✖ 열기 실패로 건너뜀: {t.splitlines()[0][:40]}")
+    log(f"🃏 카드 수집 완료: {len(collected)}/{len(targets)}개")
     return collected
 
 def _wait_and_collect(driver, timeout_sec: int = 20) -> list[tuple[str, str]]:
@@ -897,6 +924,26 @@ class Worker:
                 self.log("   로그인 후 창을 닫지 말고 그대로 두면 세션이 프로필에 저장됩니다.")
             except Exception as e:
                 self.log(f"❌ 브라우저 실행 실패: {e}")
+        threading.Thread(target=_run, daemon=True).start()
+
+    # ── 네이버 로그인 테스트 ──
+    def test_naver_login(self, cfg):
+        def _run():
+            if not self._busy.acquire(blocking=False):
+                self.log("⚠️ 이미 작업이 진행 중입니다.")
+                return
+            try:
+                self.log("🔐 네이버 로그인 테스트를 시작합니다...")
+                browser = self._get_browser(cfg)
+                driver = browser.get_driver()
+                if ensure_naver_login(driver, cfg, self.log):
+                    self.log("✅ 로그인 테스트 성공! 이제 [포스팅 시작]을 누르면 바로 발행됩니다.")
+                else:
+                    self.log("❌ 로그인 테스트 실패. 크롬 창에서 직접 로그인한 뒤 다시 테스트해 주세요.")
+            except Exception as e:
+                self.log(f"❌ 로그인 테스트 오류: {e}")
+            finally:
+                self._busy.release()
         threading.Thread(target=_run, daemon=True).start()
 
     # ── 방식 0: Lilys 노트 링크 → 블로그 (API 불필요) ──
@@ -1194,41 +1241,51 @@ class App(tk.Tk):
                  relief="flat", font=FONT_M).pack(
             side="left", fill="x", expand=True, ipady=4)
 
-        # 버튼 행
-        btn_frame = tk.Frame(self, bg=BG)
-        btn_frame.pack(pady=10)
+        # 버튼 행 1: 설정/로그인
+        btn_row1 = tk.Frame(self, bg=BG)
+        btn_row1.pack(pady=(10, 3))
 
-        tk.Button(btn_frame, text="🔑 로그인용 브라우저 열기", font=FONT_B,
+        tk.Button(btn_row1, text="💾 설정 저장", font=FONT_B,
+                  bg="#475569", fg="white", activebackground="#334155",
+                  activeforeground="white", relief="flat",
+                  padx=12, pady=6, cursor="hand2",
+                  command=self._save_cfg).pack(side="left", padx=5)
+
+        tk.Button(btn_row1, text="🔑 로그인용 브라우저 열기", font=FONT_B,
                   bg="#0f766e", fg="white", activebackground="#0d6060",
                   activeforeground="white", relief="flat",
                   padx=12, pady=6, cursor="hand2",
                   command=self._on_open_login).pack(side="left", padx=5)
 
-        tk.Button(btn_frame, text="▶ 요약 → 블로그 발행", font=FONT_B,
+        tk.Button(btn_row1, text="🔐 네이버 로그인 테스트", font=FONT_B,
+                  bg="#9333ea", fg="white", activebackground="#7e22ce",
+                  activeforeground="white", relief="flat",
+                  padx=12, pady=6, cursor="hand2",
+                  command=self._on_test_login).pack(side="left", padx=5)
+
+        # 버튼 행 2: 발행 작업
+        btn_row2 = tk.Frame(self, bg=BG)
+        btn_row2.pack(pady=(3, 10))
+
+        tk.Button(btn_row2, text="▶ 요약 → 블로그 발행", font=FONT_B,
                   bg=ACCENT, fg="white", activebackground=ACCENT_H,
                   activeforeground="white", relief="flat",
                   padx=12, pady=6, cursor="hand2",
                   command=self._on_summarize).pack(side="left", padx=5)
 
-        tk.Button(btn_frame, text="📥 라이브러리에서 골라 발행", font=FONT_B,
+        tk.Button(btn_row2, text="📥 라이브러리에서 골라 발행", font=FONT_B,
                   bg="#1d4ed8", fg="white", activebackground="#1e40af",
                   activeforeground="white", relief="flat",
                   padx=12, pady=6, cursor="hand2",
                   command=self._on_pick_from_library).pack(side="left", padx=5)
 
         self._btn_watch = tk.Button(
-            btn_frame, text="👀 라이브러리 감시 시작", font=FONT_B,
+            btn_row2, text="👀 라이브러리 감시 시작", font=FONT_B,
             bg="#b45309", fg="white", activebackground="#92400e",
             activeforeground="white", relief="flat",
             padx=12, pady=6, cursor="hand2",
             command=self._on_toggle_watch)
         self._btn_watch.pack(side="left", padx=5)
-
-        tk.Button(btn_frame, text="💾 설정 저장", font=FONT_B,
-                  bg="#475569", fg="white", activebackground="#334155",
-                  activeforeground="white", relief="flat",
-                  padx=12, pady=6, cursor="hand2",
-                  command=self._save_cfg).pack(side="left", padx=5)
 
         # 로그창
         tk.Label(self, text="로그", bg=BG, fg=FG_DIM, font=FONT_M,
@@ -1262,6 +1319,10 @@ class App(tk.Tk):
     def _on_open_login(self):
         cfg = self._save_cfg()
         self._worker.open_login_browser(cfg)
+
+    def _on_test_login(self):
+        cfg = self._save_cfg()
+        self._worker.test_naver_login(cfg)
 
     def _on_summarize(self):
         cfg = self._save_cfg()
