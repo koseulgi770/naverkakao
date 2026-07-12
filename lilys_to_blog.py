@@ -368,20 +368,40 @@ def ensure_naver_login(driver, cfg, log) -> bool:
     else:
         log("ℹ️ 설정에 네이버 ID/PW가 없어 수동 로그인을 기다립니다")
 
+    # 새 기기 등록 확인 화면이 나오면 '등록안함' 클릭
+    try:
+        for el in driver.find_elements(
+                By.XPATH, "//*[contains(text(), '등록안함') or contains(text(), '등록 안함')]"):
+            if el.is_displayed():
+                el.click()
+                time.sleep(3)
+                break
+    except Exception:
+        pass
+
     if "nid.naver.com" not in driver.current_url:
         log("✅ 네이버 로그인 성공")
         return True
 
-    # 실패 시 60초간 수동 로그인 대기 (캡차/2단계 인증 대응)
-    log("⚠️ 자동 로그인 실패 — 열린 브라우저에서 60초 안에 직접 로그인해 주세요...")
-    for remaining in range(60, 0, -5):
+    # 캡차가 뜬 경우 안내
+    try:
+        if driver.find_elements(By.CSS_SELECTOR,
+                                "#captcha, img#captchaimg, #rcapt, .captcha"):
+            log("⚠️ 캡차(보안문자)가 나타났습니다 — 크롬 창에서 캡차를 입력하고 직접 로그인해 주세요")
+    except Exception:
+        pass
+
+    # 실패 시 120초간 수동 로그인 대기 (캡차/2단계 인증 대응)
+    log("⚠️ 자동 로그인 미완료 — 열린 크롬 창에서 120초 안에 직접 로그인해 주세요...")
+    for remaining in range(120, 0, -5):
         time.sleep(5)
         if "nid.naver.com" not in driver.current_url:
             log("✅ 수동 로그인 확인됨!")
             return True
-        log(f"⏳ 수동 로그인 대기 중... {remaining}초 남음")
+        if remaining % 15 == 0:
+            log(f"⏳ 수동 로그인 대기 중... {remaining}초 남음")
 
-    log("❌ 60초 내에 로그인되지 않았습니다")
+    log("❌ 시간 내에 로그인되지 않았습니다")
     return False
 
 def post_to_naver_blog(browser: Browser, cfg: dict, title: str, content: str,
@@ -947,6 +967,15 @@ class Worker:
             try:
                 posted = load_posted()
                 browser = self._get_browser(cfg)
+
+                # 발행 전에 네이버 로그인을 먼저 확보 (실패 시 전체 중단)
+                driver = browser.get_driver()
+                if not ensure_naver_login(driver, cfg, self.log):
+                    self.log("❌ 네이버 로그인에 실패해 발행을 중단합니다. 로그인 후 다시 [포스팅 시작]을 눌러주세요.")
+                    for url, _t in notes:
+                        _set(url, "대기")
+                    return
+
                 for url, list_title in notes:
                     self.log(f"▶ 노트 발행 시작: {list_title}")
                     _set(url, "진행중")
