@@ -1,9 +1,10 @@
 """
 Lilys AI → 네이버 블로그 자동 포스팅 도구
 
-두 가지 방식으로 글을 가져와 네이버 블로그에 자동 발행합니다.
-  1. 유튜브 링크 입력 → Lilys AI 공식 API로 요약(blogPost 형식) → 네이버 블로그 발행
-  2. Lilys AI 보관함(https://lilys.ai/collections) 감시 → 새 노트 발견 시 내용 추출 → 발행
+세 가지 방식으로 글을 가져와 네이버 블로그에 자동 발행합니다.
+  1. Lilys 노트 링크 붙여넣기 → 내용 추출 → 발행 (API 키 불필요)
+  2. Lilys AI 보관함(https://lilys.ai/collections) 감시 → 새 노트 발견 시 자동 발행 (API 키 불필요)
+  3. 유튜브 링크 입력 → Lilys AI 공식 API로 요약(blogPost 형식) → 발행 (API 키 필요)
 
 네이버 블로그는 공식 글쓰기 API가 종료되어(2020년) Selenium 브라우저 자동화로 발행합니다.
 전용 크롬 프로필(chrome_profile 폴더)을 사용하므로, [로그인용 브라우저 열기] 버튼으로
@@ -399,6 +400,34 @@ class Worker:
                 self.log(f"❌ 브라우저 실행 실패: {e}")
         threading.Thread(target=_run, daemon=True).start()
 
+    # ── 방식 0: Lilys 노트 링크 → 블로그 (API 불필요) ──
+    def post_note_link(self, cfg, note_url: str):
+        def _run():
+            if not self._busy.acquire(blocking=False):
+                self.log("⚠️ 이미 작업이 진행 중입니다.")
+                return
+            try:
+                self.log(f"▶ Lilys 노트 가져오기: {note_url}")
+                browser = self._get_browser(cfg)
+                title, body = fetch_note_content(browser, note_url, self.log)
+                if not body or len(body) < 100:
+                    self.log("❌ 노트 본문을 가져오지 못했습니다. Lilys 로그인 상태와 링크를 확인해 주세요.")
+                    return
+                if not title:
+                    title = body.strip().splitlines()[0][:80]
+                body = markdown_to_plain(body) + f"\n\n원본 노트: {note_url}"
+                self.log(f"📄 노트 내용 추출 완료: {title}")
+
+                ok = post_to_naver_blog(
+                    browser, title, body, cfg["publish_mode"], self.log)
+                if ok:
+                    self.log("✅ 블로그 포스팅 완료")
+            except Exception as e:
+                self.log(f"❌ 오류 발생: {e}")
+            finally:
+                self._busy.release()
+        threading.Thread(target=_run, daemon=True).start()
+
     # ── 방식 1: 유튜브 링크 → Lilys API → 블로그 ──
     def summarize_and_post(self, cfg, youtube_url: str):
         def _run():
@@ -535,7 +564,7 @@ class App(tk.Tk):
 
         self._cfg_vars = {}
         fields = [
-            ("lilys_api_key",          "Lilys API Key",        True),
+            ("lilys_api_key",          "Lilys API Key (선택, 유튜브 직접 요약용)", True),
             ("model_type",             "요약 모델 (gpt-3.5 / gpt-4)", False),
             ("result_language",        "요약 언어 (ko / en)",   False),
             ("check_interval_minutes", "보관함 체크 주기 (분)", False),
@@ -558,7 +587,7 @@ class App(tk.Tk):
         # 유튜브 링크 입력 행
         yt_frame = tk.Frame(self, bg=BG)
         yt_frame.pack(fill="x", padx=24, pady=(12, 4))
-        tk.Label(yt_frame, text="유튜브 링크", bg=BG, fg=FG_DIM,
+        tk.Label(yt_frame, text="유튜브 링크 또는 Lilys 노트 링크", bg=BG, fg=FG_DIM,
                  font=FONT_M).pack(side="left", padx=(0, 8))
         self._yt_var = tk.StringVar()
         tk.Entry(yt_frame, textvariable=self._yt_var,
@@ -632,13 +661,24 @@ class App(tk.Tk):
     def _on_summarize(self):
         cfg = self._save_cfg()
         url = self._yt_var.get().strip()
-        if not cfg.get("lilys_api_key"):
-            messagebox.showwarning("설정 필요", "Lilys API Key를 먼저 입력해 주세요.\n(https://lilys.ai/api 에서 발급)")
+        if not url:
+            messagebox.showwarning("입력 필요", "유튜브 링크 또는 Lilys 노트 링크를 입력해 주세요.")
             return
-        if not url or "youtu" not in url:
-            messagebox.showwarning("입력 필요", "유튜브 링크를 입력해 주세요.")
-            return
-        self._worker.summarize_and_post(cfg, url)
+        if "lilys.ai" in url:
+            # Lilys 노트 링크 → API 없이 브라우저로 내용을 가져와 발행
+            self._worker.post_note_link(cfg, url)
+        elif "youtu" in url:
+            if not cfg.get("lilys_api_key"):
+                messagebox.showwarning(
+                    "API Key 필요",
+                    "유튜브 링크를 직접 요약하려면 Lilys API Key가 필요합니다.\n\n"
+                    "API 없이 쓰시려면:\n"
+                    "1) Lilys 앱에서 영상을 요약한 뒤 노트 링크를 여기에 붙여넣거나\n"
+                    "2) [보관함 감시 시작]을 켜 두세요.")
+                return
+            self._worker.summarize_and_post(cfg, url)
+        else:
+            messagebox.showwarning("입력 확인", "유튜브 링크 또는 lilys.ai 노트 링크만 지원합니다.")
 
     def _on_toggle_watch(self):
         if self._worker._watching:
