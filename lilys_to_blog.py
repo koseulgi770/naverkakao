@@ -428,6 +428,59 @@ class Worker:
                 self._busy.release()
         threading.Thread(target=_run, daemon=True).start()
 
+    # ── 보관함 목록 불러오기 / 선택 발행 ──
+    def fetch_notes_async(self, cfg, on_done):
+        """보관함의 (URL, 제목) 목록을 가져와 on_done(notes) 콜백으로 전달한다."""
+        def _run():
+            if not self._busy.acquire(blocking=False):
+                self.log("⚠️ 이미 작업이 진행 중입니다.")
+                return
+            try:
+                self.log("📥 보관함 목록을 불러오는 중...")
+                browser = self._get_browser(cfg)
+                notes = fetch_collection_notes(browser, self.log)
+                if notes:
+                    self.log(f"🔍 보관함에서 노트 {len(notes)}개를 찾았습니다")
+                    on_done(notes)
+                else:
+                    self.log("⚠️ 보관함에서 노트를 찾지 못했습니다. Lilys 로그인 상태를 확인해 주세요.")
+            except Exception as e:
+                self.log(f"❌ 보관함 불러오기 실패: {e}")
+            finally:
+                self._busy.release()
+        threading.Thread(target=_run, daemon=True).start()
+
+    def post_selected_notes(self, cfg, notes: list):
+        """선택한 노트들을 순서대로 블로그에 발행한다."""
+        def _run():
+            if not self._busy.acquire(blocking=False):
+                self.log("⚠️ 이미 작업이 진행 중입니다.")
+                return
+            try:
+                posted = load_posted()
+                browser = self._get_browser(cfg)
+                for url, list_title in notes:
+                    self.log(f"▶ 노트 발행 시작: {list_title}")
+                    title, body = fetch_note_content(browser, url, self.log)
+                    if not body or len(body) < 100:
+                        self.log(f"⚠️ 본문 추출 실패, 건너뜁니다: {list_title}")
+                        continue
+                    title = title or list_title
+                    body = markdown_to_plain(body) + f"\n\n원본 노트: {url}"
+                    ok = post_to_naver_blog(
+                        browser, title, body, cfg["publish_mode"], self.log)
+                    if ok:
+                        posted.add(url)
+                        save_posted(posted)
+                        self.log(f"✅ 블로그 포스팅 완료: {title}")
+                    time.sleep(3)
+                self.log("🏁 선택한 노트 발행 작업이 끝났습니다")
+            except Exception as e:
+                self.log(f"❌ 오류 발생: {e}")
+            finally:
+                self._busy.release()
+        threading.Thread(target=_run, daemon=True).start()
+
     # ── 방식 1: 유튜브 링크 → Lilys API → 블로그 ──
     def summarize_and_post(self, cfg, youtube_url: str):
         def _run():
@@ -611,6 +664,12 @@ class App(tk.Tk):
                   padx=12, pady=6, cursor="hand2",
                   command=self._on_summarize).pack(side="left", padx=5)
 
+        tk.Button(btn_frame, text="📥 보관함에서 골라 발행", font=FONT_B,
+                  bg="#1d4ed8", fg="white", activebackground="#1e40af",
+                  activeforeground="white", relief="flat",
+                  padx=12, pady=6, cursor="hand2",
+                  command=self._on_pick_from_library).pack(side="left", padx=5)
+
         self._btn_watch = tk.Button(
             btn_frame, text="👀 보관함 감시 시작", font=FONT_B,
             bg="#b45309", fg="white", activebackground="#92400e",
@@ -679,6 +738,58 @@ class App(tk.Tk):
             self._worker.summarize_and_post(cfg, url)
         else:
             messagebox.showwarning("입력 확인", "유튜브 링크 또는 lilys.ai 노트 링크만 지원합니다.")
+
+    def _on_pick_from_library(self):
+        cfg = self._save_cfg()
+        self._worker.fetch_notes_async(
+            cfg, lambda notes: self.after(0, self._show_note_picker, cfg, notes))
+
+    def _show_note_picker(self, cfg, notes):
+        """보관함 노트 목록에서 발행할 노트를 고르는 창."""
+        win = tk.Toplevel(self)
+        win.title("보관함에서 발행할 노트 선택")
+        win.geometry("560x460")
+        win.configure(bg=BG)
+
+        posted = load_posted()
+        tk.Label(win, text="발행할 노트를 선택하세요 (Ctrl/Shift 클릭으로 여러 개 선택 가능)",
+                 bg=BG, fg=FG_DIM, font=FONT_M).pack(pady=(12, 6))
+
+        frame = tk.Frame(win, bg=BG)
+        frame.pack(fill="both", expand=True, padx=16)
+        scrollbar = tk.Scrollbar(frame)
+        scrollbar.pack(side="right", fill="y")
+        listbox = tk.Listbox(
+            frame, selectmode="extended", font=FONT_M,
+            bg=SURFACE, fg=FG, selectbackground=ACCENT,
+            relief="flat", yscrollcommand=scrollbar.set)
+        listbox.pack(side="left", fill="both", expand=True)
+        scrollbar.config(command=listbox.yview)
+
+        for url, title in notes:
+            mark = "✅ " if url in posted else ""
+            listbox.insert("end", f"{mark}{title}")
+
+        def _publish():
+            selected = [notes[i] for i in listbox.curselection()]
+            if not selected:
+                messagebox.showwarning("선택 필요", "발행할 노트를 선택해 주세요.", parent=win)
+                return
+            win.destroy()
+            self._worker.post_selected_notes(cfg, selected)
+
+        btns = tk.Frame(win, bg=BG)
+        btns.pack(pady=12)
+        tk.Button(btns, text="🚀 선택한 노트 발행", font=FONT_B,
+                  bg=ACCENT, fg="white", activebackground=ACCENT_H,
+                  activeforeground="white", relief="flat",
+                  padx=16, pady=6, cursor="hand2",
+                  command=_publish).pack(side="left", padx=6)
+        tk.Button(btns, text="닫기", font=FONT_B,
+                  bg="#475569", fg="white", activebackground="#334155",
+                  activeforeground="white", relief="flat",
+                  padx=16, pady=6, cursor="hand2",
+                  command=win.destroy).pack(side="left", padx=6)
 
     def _on_toggle_watch(self):
         if self._worker._watching:
