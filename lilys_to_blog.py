@@ -3,7 +3,7 @@ Lilys AI → 네이버 블로그 자동 포스팅 도구
 
 세 가지 방식으로 글을 가져와 네이버 블로그에 자동 발행합니다.
   1. Lilys 노트 링크 붙여넣기 → 내용 추출 → 발행 (API 키 불필요)
-  2. Lilys AI 보관함(https://lilys.ai/collections) 감시 → 새 노트 발견 시 자동 발행 (API 키 불필요)
+  2. Lilys AI 라이브러리(https://lilys.ai/library) 감시 → 새 노트 발견 시 자동 발행 (API 키 불필요)
   3. 유튜브 링크 입력 → Lilys AI 공식 API로 요약(blogPost 형식) → 발행 (API 키 필요)
 
 네이버 블로그는 공식 글쓰기 API가 종료되어(2020년) Selenium 브라우저 자동화로 발행합니다.
@@ -32,6 +32,7 @@ DEFAULT_CONFIG = {
     "model_type": "gpt-4",
     "result_language": "ko",
     "check_interval_minutes": 30,
+    "lilys_folder_name": "",
     "chrome_profile_dir": os.path.join(BASE_DIR, "chrome_profile"),
     "publish_mode": "publish",  # "publish"(즉시 발행) 또는 "draft"(임시저장)
 }
@@ -177,7 +178,7 @@ def markdown_to_plain(text: str) -> str:
     return text.strip()
 
 # ──────────────────────────────────────────────
-# Selenium 브라우저 (네이버 발행 + Lilys 보관함 감시 공용)
+# Selenium 브라우저 (네이버 발행 + Lilys 라이브러리 감시 공용)
 # ──────────────────────────────────────────────
 class Browser:
     def __init__(self, profile_dir: str, log):
@@ -313,19 +314,11 @@ def post_to_naver_blog(browser: Browser, title: str, content: str,
     return True
 
 # ──────────────────────────────────────────────
-# Lilys 보관함(콜렉션) 감시
+# Lilys 라이브러리(콜렉션) 감시
 # ──────────────────────────────────────────────
-def fetch_collection_notes(browser: Browser, log) -> list[tuple[str, str]]:
-    """보관함 페이지에서 (노트URL, 제목) 목록을 수집한다."""
+def _collect_note_links(driver) -> list[tuple[str, str]]:
+    """현재 페이지에서 (노트URL, 제목) 링크들을 수집한다."""
     from selenium.webdriver.common.by import By
-
-    driver = browser.get_driver()
-    driver.get("https://lilys.ai/collections")
-    time.sleep(6)
-
-    if "signin" in driver.current_url or "login" in driver.current_url:
-        log("❌ Lilys AI 로그인이 필요합니다. [로그인용 브라우저 열기]로 먼저 로그인해 주세요.")
-        return []
 
     notes, seen = [], set()
     for a in driver.find_elements(By.CSS_SELECTOR, "a[href*='/notes/'], a[href*='/digest/']"):
@@ -338,6 +331,48 @@ def fetch_collection_notes(browser: Browser, log) -> list[tuple[str, str]]:
                 notes.append((href, title))
         except Exception:
             continue
+    return notes
+
+def fetch_collection_notes(browser: Browser, log,
+                           folder_name: str = "") -> list[tuple[str, str]]:
+    """
+    라이브러리(또는 보관함) 페이지에서 (노트URL, 제목) 목록을 수집한다.
+    folder_name 이 지정되면 사이드바에서 해당 폴더를 클릭한 뒤 수집한다.
+    """
+    from selenium.webdriver.common.by import By
+
+    driver = browser.get_driver()
+    notes = []
+    # 라이브러리 → 보관함 순으로 시도 (Lilys 화면 구성에 따라 다름)
+    for url in ("https://lilys.ai/library", "https://lilys.ai/collections"):
+        driver.get(url)
+        time.sleep(6)
+
+        if "signin" in driver.current_url or "login" in driver.current_url:
+            log("❌ Lilys AI 로그인이 필요합니다. [로그인용 브라우저 열기]로 먼저 로그인해 주세요.")
+            return []
+
+        # 특정 폴더만 가져오도록 설정한 경우 사이드바에서 폴더 클릭
+        if folder_name:
+            clicked = False
+            for el in driver.find_elements(
+                    By.XPATH, f"//*[contains(normalize-space(text()), '{folder_name}')]"):
+                try:
+                    if el.is_displayed():
+                        el.click()
+                        time.sleep(5)
+                        clicked = True
+                        break
+                except Exception:
+                    continue
+            if clicked:
+                log(f"📂 '{folder_name}' 폴더를 열었습니다")
+            else:
+                log(f"⚠️ '{folder_name}' 폴더를 찾지 못했습니다. 전체 목록에서 수집합니다.")
+
+        notes = _collect_note_links(driver)
+        if notes:
+            break
     return notes
 
 def fetch_note_content(browser: Browser, note_url: str, log) -> tuple[str, str]:
@@ -370,7 +405,7 @@ def fetch_note_content(browser: Browser, note_url: str, log) -> tuple[str, str]:
 # 백그라운드 워커
 # ──────────────────────────────────────────────
 class Worker:
-    """유튜브 단건 처리 / 보관함 감시 루프를 담당."""
+    """유튜브 단건 처리 / 라이브러리 감시 루프를 담당."""
 
     def __init__(self, log_fn):
         self.log = log_fn
@@ -428,24 +463,25 @@ class Worker:
                 self._busy.release()
         threading.Thread(target=_run, daemon=True).start()
 
-    # ── 보관함 목록 불러오기 / 선택 발행 ──
+    # ── 라이브러리 목록 불러오기 / 선택 발행 ──
     def fetch_notes_async(self, cfg, on_done):
-        """보관함의 (URL, 제목) 목록을 가져와 on_done(notes) 콜백으로 전달한다."""
+        """라이브러리의 (URL, 제목) 목록을 가져와 on_done(notes) 콜백으로 전달한다."""
         def _run():
             if not self._busy.acquire(blocking=False):
                 self.log("⚠️ 이미 작업이 진행 중입니다.")
                 return
             try:
-                self.log("📥 보관함 목록을 불러오는 중...")
+                self.log("📥 라이브러리 목록을 불러오는 중...")
                 browser = self._get_browser(cfg)
-                notes = fetch_collection_notes(browser, self.log)
+                notes = fetch_collection_notes(
+                    browser, self.log, cfg.get("lilys_folder_name", ""))
                 if notes:
-                    self.log(f"🔍 보관함에서 노트 {len(notes)}개를 찾았습니다")
+                    self.log(f"🔍 라이브러리에서 노트 {len(notes)}개를 찾았습니다")
                     on_done(notes)
                 else:
-                    self.log("⚠️ 보관함에서 노트를 찾지 못했습니다. Lilys 로그인 상태를 확인해 주세요.")
+                    self.log("⚠️ 라이브러리에서 노트를 찾지 못했습니다. Lilys 로그인 상태를 확인해 주세요.")
             except Exception as e:
-                self.log(f"❌ 보관함 불러오기 실패: {e}")
+                self.log(f"❌ 라이브러리 불러오기 실패: {e}")
             finally:
                 self._busy.release()
         threading.Thread(target=_run, daemon=True).start()
@@ -513,7 +549,7 @@ class Worker:
                 self._busy.release()
         threading.Thread(target=_run, daemon=True).start()
 
-    # ── 방식 2: 보관함 감시 ──
+    # ── 방식 2: 라이브러리 감시 ──
     def start_watching(self, cfg):
         if self._watching:
             return
@@ -530,13 +566,14 @@ class Worker:
         interval = max(int(cfg.get("check_interval_minutes", 30)), 5) * 60
         first_scan = len(posted) == 0
 
-        self.log("▶ 보관함 감시 시작")
+        self.log("▶ 라이브러리 감시 시작")
         while self._watching:
             if self._busy.acquire(blocking=False):
                 try:
                     browser = self._get_browser(cfg)
-                    notes = fetch_collection_notes(browser, self.log)
-                    self.log(f"🔍 보관함 노트 {len(notes)}개 확인")
+                    notes = fetch_collection_notes(
+                        browser, self.log, cfg.get("lilys_folder_name", ""))
+                    self.log(f"🔍 라이브러리 노트 {len(notes)}개 확인")
 
                     if first_scan and notes:
                         # 최초 실행 시 기존 노트는 발행하지 않고 '본 것'으로만 기록
@@ -576,7 +613,7 @@ class Worker:
                     break
                 time.sleep(1)
 
-        self.log("⏹ 보관함 감시 중지")
+        self.log("⏹ 라이브러리 감시 중지")
 
 # ──────────────────────────────────────────────
 # GUI
@@ -608,7 +645,7 @@ class App(tk.Tk):
     def _build_ui(self):
         tk.Label(self, text="Lilys AI → 네이버 블로그 자동 포스팅",
                  bg=BG, fg=FG, font=FONT_T).pack(pady=(16, 4))
-        tk.Label(self, text="유튜브 링크를 요약하거나, Lilys 보관함의 새 노트를 감지해 블로그에 자동 발행합니다",
+        tk.Label(self, text="유튜브 링크를 요약하거나, Lilys 라이브러리의 새 노트를 감지해 블로그에 자동 발행합니다",
                  bg=BG, fg=FG_DIM, font=FONT_M).pack(pady=(0, 12))
 
         # 설정 카드
@@ -620,7 +657,8 @@ class App(tk.Tk):
             ("lilys_api_key",          "Lilys API Key (선택, 유튜브 직접 요약용)", True),
             ("model_type",             "요약 모델 (gpt-3.5 / gpt-4)", False),
             ("result_language",        "요약 언어 (ko / en)",   False),
-            ("check_interval_minutes", "보관함 체크 주기 (분)", False),
+            ("check_interval_minutes", "라이브러리 체크 주기 (분)", False),
+            ("lilys_folder_name",      "라이브러리 폴더 이름 (비우면 전체)", False),
             ("chrome_profile_dir",     "크롬 프로필 폴더",      False),
             ("publish_mode",           "발행 방식 (publish / draft)", False),
         ]
@@ -664,14 +702,14 @@ class App(tk.Tk):
                   padx=12, pady=6, cursor="hand2",
                   command=self._on_summarize).pack(side="left", padx=5)
 
-        tk.Button(btn_frame, text="📥 보관함에서 골라 발행", font=FONT_B,
+        tk.Button(btn_frame, text="📥 라이브러리에서 골라 발행", font=FONT_B,
                   bg="#1d4ed8", fg="white", activebackground="#1e40af",
                   activeforeground="white", relief="flat",
                   padx=12, pady=6, cursor="hand2",
                   command=self._on_pick_from_library).pack(side="left", padx=5)
 
         self._btn_watch = tk.Button(
-            btn_frame, text="👀 보관함 감시 시작", font=FONT_B,
+            btn_frame, text="👀 라이브러리 감시 시작", font=FONT_B,
             bg="#b45309", fg="white", activebackground="#92400e",
             activeforeground="white", relief="flat",
             padx=12, pady=6, cursor="hand2",
@@ -733,7 +771,7 @@ class App(tk.Tk):
                     "유튜브 링크를 직접 요약하려면 Lilys API Key가 필요합니다.\n\n"
                     "API 없이 쓰시려면:\n"
                     "1) Lilys 앱에서 영상을 요약한 뒤 노트 링크를 여기에 붙여넣거나\n"
-                    "2) [보관함 감시 시작]을 켜 두세요.")
+                    "2) [라이브러리 감시 시작]을 켜 두세요.")
                 return
             self._worker.summarize_and_post(cfg, url)
         else:
@@ -745,9 +783,9 @@ class App(tk.Tk):
             cfg, lambda notes: self.after(0, self._show_note_picker, cfg, notes))
 
     def _show_note_picker(self, cfg, notes):
-        """보관함 노트 목록에서 발행할 노트를 고르는 창."""
+        """라이브러리 노트 목록에서 발행할 노트를 고르는 창."""
         win = tk.Toplevel(self)
-        win.title("보관함에서 발행할 노트 선택")
+        win.title("라이브러리에서 발행할 노트 선택")
         win.geometry("560x460")
         win.configure(bg=BG)
 
@@ -794,11 +832,11 @@ class App(tk.Tk):
     def _on_toggle_watch(self):
         if self._worker._watching:
             self._worker.stop_watching()
-            self._btn_watch.config(text="👀 보관함 감시 시작", bg="#b45309")
+            self._btn_watch.config(text="👀 라이브러리 감시 시작", bg="#b45309")
         else:
             cfg = self._save_cfg()
             self._worker.start_watching(cfg)
-            self._btn_watch.config(text="⏹ 보관함 감시 중지", bg="#7f1d1d")
+            self._btn_watch.config(text="⏹ 라이브러리 감시 중지", bg="#7f1d1d")
 
     # ── 로그 ─────────────────────────────────
     def _append_log(self, msg: str):
