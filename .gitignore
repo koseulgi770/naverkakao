@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+
+# 로컬 상태/개인 설정 파일
+sent_orders.json
+posted_notes.json
+lilys_config.json
+chrome_profile/
