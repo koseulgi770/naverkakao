@@ -38,6 +38,8 @@ DEFAULT_CONFIG = {
     "lilys_folder_name": "",
     "max_fetch_count": 10,
     "lilys_report_name": "",
+    "lilys_summary_length": "기본",
+    "transform_mode": "clean",
     "chrome_profile_dir": os.path.join(BASE_DIR, "chrome_profile"),
     "publish_mode": "publish",  # "publish"(발행) / "draft"(임시저장) / "schedule"(예약발행)
     "schedule_time": "",        # 예약발행 시각 (예: 2026-07-15 09:00)
@@ -50,6 +52,22 @@ PUBLISH_MODE_LABELS = {
     "schedule": "⏰ 예약발행",
 }
 PUBLISH_MODE_CODES = {v: k for k, v in PUBLISH_MODE_LABELS.items()}
+
+# 본문 변형 방식
+TRANSFORM_MODE_LABELS = {
+    "clean": "✂️ 자동 정리 (각주 제거+인용구)",
+    "raw": "📄 원문 그대로 (변형 없음)",
+}
+TRANSFORM_MODE_CODES = {v: k for k, v in TRANSFORM_MODE_LABELS.items()}
+
+# Lilys 요약 길이 옵션 (노트 화면의 버튼 텍스트 그대로)
+SUMMARY_LENGTHS = ["기본", "짧게", "길게", "쉽게"]
+
+def prepare_body(cfg: dict, body: str) -> str:
+    """설정에 따라 본문을 변형하거나 원문 그대로 반환한다."""
+    if cfg.get("transform_mode") == "raw":
+        return body.strip()
+    return markdown_to_plain(body)
 
 def load_config() -> dict:
     cfg = dict(DEFAULT_CONFIG)
@@ -777,7 +795,7 @@ def post_to_naver_blog(browser: Browser, cfg: dict, title: str, content: str,
             safe_press(driver, "enter")
             time.sleep(0.05)
             continue
-        if looks_like_quote(line):
+        if cfg.get("transform_mode") != "raw" and looks_like_quote(line):
             try:
                 insert_quote_block(driver, line)
                 wrote_any = True
@@ -1188,11 +1206,29 @@ def _click_report_tab(driver, report_name: str, log) -> bool:
         "(Lilys에서 해당 확장 리포트를 먼저 생성해 두어야 합니다)")
     return False
 
+def _click_summary_length(driver, length: str, log):
+    """요약 길이 버튼(짧게/기본/길게/쉽게)을 클릭한다."""
+    from selenium.webdriver.common.by import By
+    for el in driver.find_elements(
+            By.XPATH, f"//*[normalize-space(text())='{length}']"):
+        try:
+            if el.is_displayed():
+                el.click()
+                time.sleep(5)  # 길이 변경 후 내용 갱신 대기
+                log(f"📏 요약 길이 '{length}' 적용")
+                return True
+        except Exception:
+            continue
+    log(f"⚠️ 요약 길이 '{length}' 버튼을 찾지 못해 기본 길이로 가져옵니다")
+    return False
+
 def fetch_note_content(browser: Browser, note_url: str, log,
-                       report_name: str = "") -> tuple[str, str]:
+                       report_name: str = "",
+                       summary_length: str = "") -> tuple[str, str]:
     """
     노트 페이지에서 (제목, 본문 텍스트)를 추출한다.
     report_name 이 지정되면 해당 탭(확장 리포트)을 클릭한 뒤 내용을 가져온다.
+    summary_length(짧게/길게/쉽게)가 지정되면 요약 길이를 바꾼 뒤 가져온다.
     """
     from selenium.webdriver.common.by import By
 
@@ -1208,6 +1244,8 @@ def fetch_note_content(browser: Browser, note_url: str, log,
 
     if report_name:
         _click_report_tab(driver, report_name, log)
+    elif summary_length and summary_length != "기본":
+        _click_summary_length(driver, summary_length, log)
 
     body = ""
     for css in ("article", "main", "body"):
@@ -1285,13 +1323,14 @@ class Worker:
                 self.log(f"▶ Lilys 노트 가져오기: {note_url}")
                 browser = self._get_browser(cfg)
                 title, body = fetch_note_content(browser, note_url, self.log,
-                        report_name=cfg.get("lilys_report_name", ""))
+                        report_name=cfg.get("lilys_report_name", ""),
+                        summary_length=cfg.get("lilys_summary_length", ""))
                 if not body or len(body) < 100:
                     self.log("❌ 노트 본문을 가져오지 못했습니다. Lilys 로그인 상태와 링크를 확인해 주세요.")
                     return
                 if not title:
                     title = body.strip().splitlines()[0][:80]
-                body = markdown_to_plain(body) + f"\n\n원본 노트: {note_url}"
+                body = prepare_body(cfg, body) + f"\n\n원본 노트: {note_url}"
                 self.log(f"📄 노트 내용 추출 완료: {title}")
 
                 ok = post_to_naver_blog(
@@ -1357,13 +1396,14 @@ class Worker:
                     self.log(f"▶ 노트 발행 시작: {list_title}")
                     _set(url, "진행중")
                     title, body = fetch_note_content(browser, url, self.log,
-                        report_name=cfg.get("lilys_report_name", ""))
+                        report_name=cfg.get("lilys_report_name", ""),
+                        summary_length=cfg.get("lilys_summary_length", ""))
                     if not body or len(body) < 100:
                         self.log(f"⚠️ 본문 추출 실패, 건너뜁니다: {list_title}")
                         _set(url, "실패")
                         continue
                     title = title or list_title
-                    body = markdown_to_plain(body) + f"\n\n원본 노트: {url}"
+                    body = prepare_body(cfg, body) + f"\n\n원본 노트: {url}"
                     ok = post_to_naver_blog(
                         browser, cfg, title, body, self.log)
                     if ok:
@@ -1391,7 +1431,8 @@ class Worker:
                 self.log(f"🔎 미리보기 불러오는 중: {fallback_title}")
                 browser = self._get_browser(cfg)
                 title, body = fetch_note_content(browser, url, self.log,
-                        report_name=cfg.get("lilys_report_name", ""))
+                        report_name=cfg.get("lilys_report_name", ""),
+                        summary_length=cfg.get("lilys_summary_length", ""))
                 on_ready(title or fallback_title,
                          body or "(본문을 가져오지 못했습니다)")
             except Exception as e:
@@ -1417,7 +1458,7 @@ class Worker:
                     cfg["lilys_api_key"], request_id, self.log)
                 if not title:
                     title = body.strip().splitlines()[0][:80]
-                body = markdown_to_plain(body)
+                body = prepare_body(cfg, body)
                 body += f"\n\n출처 영상: {youtube_url}"
                 self.log(f"📄 요약 완료: {title}")
 
@@ -1474,12 +1515,13 @@ class Worker:
                                 continue
                             self.log(f"🆕 새 노트 발견: {list_title}")
                             title, body = fetch_note_content(browser, url, self.log,
-                        report_name=cfg.get("lilys_report_name", ""))
+                        report_name=cfg.get("lilys_report_name", ""),
+                        summary_length=cfg.get("lilys_summary_length", ""))
                             if not body or len(body) < 100:
                                 self.log("⚠️ 본문 추출 실패, 다음 주기에 다시 시도합니다.")
                                 continue
                             title = title or list_title
-                            body = markdown_to_plain(body) + f"\n\n원본 노트: {url}"
+                            body = prepare_body(cfg, body) + f"\n\n원본 노트: {url}"
                             ok = post_to_naver_blog(
                                 browser, cfg, title, body, self.log)
                             if ok:
@@ -1520,7 +1562,7 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Lilys AI → 네이버 블로그 자동 포스팅")
-        self.geometry("720x800")
+        self.geometry("720x860")
         self.resizable(False, False)
         self.configure(bg=BG)
 
@@ -1549,6 +1591,8 @@ class App(tk.Tk):
             ("lilys_folder_name",      "라이브러리 폴더 이름 (비우면 전체)", False),
             ("max_fetch_count",        "가져올 노트 개수 (최대)", False),
             ("lilys_report_name",      "가져올 확장 리포트 이름 (비우면 요약)", False),
+            ("lilys_summary_length",   "요약 길이",             False),
+            ("transform_mode",         "본문 변형",             False),
             ("chrome_profile_dir",     "크롬 프로필 폴더",      False),
             ("publish_mode",           "발행 방식",             False),
             ("schedule_time",          "예약 시간 (예: 2026-07-15 09:00)", False),
@@ -1560,9 +1604,14 @@ class App(tk.Tk):
                 row=i, column=0, padx=(12, 4), pady=4, sticky="w")
             var = tk.StringVar()
             self._cfg_vars[key] = var
-            if key == "publish_mode":
+            combo_values = {
+                "publish_mode": list(PUBLISH_MODE_LABELS.values()),
+                "transform_mode": list(TRANSFORM_MODE_LABELS.values()),
+                "lilys_summary_length": SUMMARY_LENGTHS,
+            }.get(key)
+            if combo_values:
                 combo = ttk.Combobox(card, textvariable=var, state="readonly",
-                                     values=list(PUBLISH_MODE_LABELS.values()),
+                                     values=combo_values,
                                      font=FONT_M, width=38)
                 combo.grid(row=i, column=1, padx=(4, 12), pady=4)
             else:
@@ -1650,6 +1699,12 @@ class App(tk.Tk):
             if k == "publish_mode":
                 var.set(PUBLISH_MODE_LABELS.get(cfg.get(k, "publish"),
                                                 PUBLISH_MODE_LABELS["publish"]))
+            elif k == "transform_mode":
+                var.set(TRANSFORM_MODE_LABELS.get(cfg.get(k, "clean"),
+                                                  TRANSFORM_MODE_LABELS["clean"]))
+            elif k == "lilys_summary_length":
+                v = cfg.get(k, "기본")
+                var.set(v if v in SUMMARY_LENGTHS else "기본")
             else:
                 var.set(str(cfg.get(k, "")))
 
@@ -1659,6 +1714,8 @@ class App(tk.Tk):
             val = var.get().strip()
             if k == "publish_mode":
                 cfg[k] = PUBLISH_MODE_CODES.get(val, "publish")
+            elif k == "transform_mode":
+                cfg[k] = TRANSFORM_MODE_CODES.get(val, "clean")
             elif k in ("check_interval_minutes", "max_fetch_count") and val.isdigit():
                 cfg[k] = int(val)
             else:
@@ -1809,7 +1866,7 @@ class App(tk.Tk):
 
             def _on_ready(t, body):
                 def _do():
-                    plain = markdown_to_plain(body)
+                    plain = prepare_body(cfg, body)
                     preview_cache[url] = (t, plain)
                     _set_preview(t, plain)
                 self.after(0, _do)
