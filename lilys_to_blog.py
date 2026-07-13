@@ -40,6 +40,8 @@ DEFAULT_CONFIG = {
     "lilys_report_name": "",
     "lilys_summary_length": "기본",
     "transform_mode": "clean",
+    "paragraph_style": "airy",
+    "text_align": "left",
     "chrome_profile_dir": os.path.join(BASE_DIR, "chrome_profile"),
     "publish_mode": "publish",  # "publish"(발행) / "draft"(임시저장) / "schedule"(예약발행)
     "schedule_time": "",        # 예약발행 시각 (예: 2026-07-15 09:00)
@@ -63,11 +65,69 @@ TRANSFORM_MODE_CODES = {v: k for k, v in TRANSFORM_MODE_LABELS.items()}
 # Lilys 요약 길이 옵션 (노트 화면의 버튼 텍스트 그대로)
 SUMMARY_LENGTHS = ["기본", "짧게", "길게", "쉽게"]
 
+# 본문 정렬
+TEXT_ALIGN_LABELS = {
+    "left": "⬅️ 왼쪽 정렬",
+    "center": "🔳 가운데 정렬",
+}
+TEXT_ALIGN_CODES = {v: k for k, v in TEXT_ALIGN_LABELS.items()}
+
+# 문단 나누기
+PARAGRAPH_LABELS = {
+    "airy": "✍️ 짧은 줄 + 여백 (모바일 가독성)",
+    "none": "📄 그대로",
+}
+PARAGRAPH_CODES = {v: k for k, v in PARAGRAPH_LABELS.items()}
+
+def _split_long_line(text: str, max_len: int = 40) -> list[str]:
+    """긴 줄을 문장 → 어절 단위로 잘라 짧은 줄 목록으로 만든다."""
+    text = text.strip()
+    if len(text) <= max_len:
+        return [text]
+    parts = re.split(r"(?<=[.!?。！？])\s+", text)
+    out = []
+    for p in parts:
+        p = p.strip()
+        if not p:
+            continue
+        if len(p) <= max_len:
+            out.append(p)
+            continue
+        words = p.split(" ")
+        cur = ""
+        for w in words:
+            if not cur:
+                cur = w
+            elif len(cur) + 1 + len(w) <= max_len:
+                cur = cur + " " + w
+            else:
+                out.append(cur)
+                cur = w
+        if cur:
+            out.append(cur)
+    return out
+
+def airy_format(text: str) -> str:
+    """블로그 가독성용: 문장을 짧은 줄로 나누고 줄 사이에 여백을 넣는다."""
+    blocks = []
+    for raw_line in text.split("\n"):
+        line = raw_line.strip()
+        if not line:
+            continue
+        if looks_like_quote(line):
+            blocks.append(line)  # 인용구는 자르지 않음
+        else:
+            blocks.extend(_split_long_line(line))
+    return "\n\n".join(blocks)
+
 def prepare_body(cfg: dict, body: str) -> str:
     """설정에 따라 본문을 변형하거나 원문 그대로 반환한다."""
     if cfg.get("transform_mode") == "raw":
         return body.strip()
-    return markdown_to_plain(body)
+    text = markdown_to_plain(body)
+    if cfg.get("paragraph_style", "airy") == "airy":
+        text = airy_format(text)
+    return text
 
 def load_config() -> dict:
     cfg = dict(DEFAULT_CONFIG)
@@ -424,6 +484,82 @@ def insert_quote_block(driver, text: str) -> bool:
     time.sleep(0.1)
     safe_press(driver, "enter")   # 다음 일반 문단 시작
     time.sleep(0.15)
+    return True
+
+def apply_alignment(driver, alignment: str) -> bool:
+    """본문 전체 선택 후 정렬을 적용한다 (툴바 버튼 + JS 폴백)."""
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.common.keys import Keys
+    from selenium.webdriver.common.action_chains import ActionChains
+
+    if not alignment or alignment == "left":
+        return False
+    try:
+        safe_hotkey(driver, "ctrl", "a")
+        time.sleep(0.2)
+    except Exception:
+        pass
+
+    # 정렬 토글 메뉴 펼치기
+    _click_toolbar_button(driver, [
+        "button.se-align-toolbar-button",
+        'button[data-name="align"]',
+        'button[aria-label*="정렬"]',
+    ])
+    time.sleep(0.2)
+
+    targets = {"center": ["가운데", "중앙", "center"],
+               "right": ["오른쪽", "우측", "right"]}.get(alignment, [])
+    clicked = False
+    try:
+        btns = driver.find_elements(By.CSS_SELECTOR,
+            'button.se-toolbar-option-align-button, '
+            'button[class*="align"][class*="button"], '
+            'li.se-toolbar-option-align-button button, '
+            'button[data-name*="align"]')
+        for b in btns:
+            try:
+                if not b.is_displayed():
+                    continue
+                attrs = " ".join([(b.get_attribute("aria-label") or ""),
+                                  (b.text or ""), (b.get_attribute("class") or ""),
+                                  (b.get_attribute("data-name") or "")]).lower()
+                if any(t.lower() in attrs for t in targets):
+                    driver.execute_script("arguments[0].click();", b)
+                    time.sleep(0.2)
+                    clicked = True
+                    break
+            except Exception:
+                continue
+    except Exception:
+        pass
+    if not clicked:
+        _click_toolbar_button(driver, [
+            f'button[class*="align"][class*="{alignment}"]',
+            f'button[data-value="{alignment}"]',
+            f'button[data-align="{alignment}"]',
+        ])
+
+    # JS 폴백 (항상 한 번 더 적용해 보장)
+    try:
+        driver.execute_script("""
+            (function(align){
+              var sels = ['.se-text-paragraph','.se-component .se-section',
+                          '.se-text','.se-component-content p'];
+              sels.forEach(function(s){
+                document.querySelectorAll(s).forEach(function(el){
+                  el.style.textAlign = align;
+                });
+              });
+            })(arguments[0]);
+        """, alignment)
+    except Exception:
+        pass
+
+    try:
+        ActionChains(driver).send_keys(Keys.END).perform()
+    except Exception:
+        pass
     return True
 
 def _set_schedule_and_publish(driver, schedule_str: str, log) -> bool:
@@ -812,6 +948,15 @@ def post_to_naver_blog(browser: Browser, cfg: dict, title: str, content: str,
         driver.switch_to.default_content()
         return False
     log("✏️ 본문 입력 완료")
+
+    # 정렬 적용 (가운데 정렬 등)
+    align = cfg.get("text_align", "left")
+    if align and align != "left":
+        try:
+            apply_alignment(driver, align)
+            log(f"📐 {TEXT_ALIGN_LABELS.get(align, align)} 적용")
+        except Exception as e:
+            log(f"⚠️ 정렬 적용 실패(계속 진행): {e}")
 
     time.sleep(1)
 
@@ -1562,7 +1707,7 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Lilys AI → 네이버 블로그 자동 포스팅")
-        self.geometry("720x860")
+        self.geometry("740x920")
         self.resizable(False, False)
         self.configure(bg=BG)
 
@@ -1593,6 +1738,8 @@ class App(tk.Tk):
             ("lilys_report_name",      "가져올 확장 리포트 이름 (비우면 요약)", False),
             ("lilys_summary_length",   "요약 길이",             False),
             ("transform_mode",         "본문 변형",             False),
+            ("paragraph_style",        "문단 나누기",           False),
+            ("text_align",             "본문 정렬",             False),
             ("chrome_profile_dir",     "크롬 프로필 폴더",      False),
             ("publish_mode",           "발행 방식",             False),
             ("schedule_time",          "예약 시간 (예: 2026-07-15 09:00)", False),
@@ -1607,6 +1754,8 @@ class App(tk.Tk):
             combo_values = {
                 "publish_mode": list(PUBLISH_MODE_LABELS.values()),
                 "transform_mode": list(TRANSFORM_MODE_LABELS.values()),
+                "paragraph_style": list(PARAGRAPH_LABELS.values()),
+                "text_align": list(TEXT_ALIGN_LABELS.values()),
                 "lilys_summary_length": SUMMARY_LENGTHS,
             }.get(key)
             if combo_values:
@@ -1702,6 +1851,12 @@ class App(tk.Tk):
             elif k == "transform_mode":
                 var.set(TRANSFORM_MODE_LABELS.get(cfg.get(k, "clean"),
                                                   TRANSFORM_MODE_LABELS["clean"]))
+            elif k == "paragraph_style":
+                var.set(PARAGRAPH_LABELS.get(cfg.get(k, "airy"),
+                                             PARAGRAPH_LABELS["airy"]))
+            elif k == "text_align":
+                var.set(TEXT_ALIGN_LABELS.get(cfg.get(k, "left"),
+                                              TEXT_ALIGN_LABELS["left"]))
             elif k == "lilys_summary_length":
                 v = cfg.get(k, "기본")
                 var.set(v if v in SUMMARY_LENGTHS else "기본")
@@ -1716,6 +1871,10 @@ class App(tk.Tk):
                 cfg[k] = PUBLISH_MODE_CODES.get(val, "publish")
             elif k == "transform_mode":
                 cfg[k] = TRANSFORM_MODE_CODES.get(val, "clean")
+            elif k == "paragraph_style":
+                cfg[k] = PARAGRAPH_CODES.get(val, "airy")
+            elif k == "text_align":
+                cfg[k] = TEXT_ALIGN_CODES.get(val, "left")
             elif k in ("check_interval_minutes", "max_fetch_count") and val.isdigit():
                 cfg[k] = int(val)
             else:
