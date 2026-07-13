@@ -783,18 +783,31 @@ def post_to_naver_blog(browser: Browser, cfg: dict, title: str, content: str,
 
     log("🌐 네이버 블로그 글쓰기 페이지 이동 중...")
 
-    def _close_extra_tabs():
-        handles = list(driver.window_handles)
-        if len(handles) > 1:
-            editor_tab = handles[-1]
-            for h in handles:
-                if h != editor_tab:
-                    try:
-                        driver.switch_to.window(h)
-                        driver.close()
-                    except Exception:
-                        pass
-            driver.switch_to.window(editor_tab)
+    def _focus_naver_tab():
+        """여러 탭 중 네이버 블로그(에디터)를 보고 있는 탭으로 전환한다.
+        (로그인용으로 열린 Lilys 탭 등을 에디터로 착각하지 않도록 URL로 판별)"""
+        try:
+            cur = driver.current_window_handle
+        except Exception:
+            cur = None
+        fallback = None
+        for h in list(driver.window_handles):
+            try:
+                driver.switch_to.window(h)
+                u = driver.current_url or ""
+            except Exception:
+                continue
+            if "blog.naver.com" in u:
+                fallback = h
+                if any(k in u.lower() for k in ("postwrite", "goblogwrite", "postwriteform")):
+                    return  # 에디터 탭 확정
+        if fallback:
+            driver.switch_to.window(fallback)
+        elif cur:
+            try:
+                driver.switch_to.window(cur)
+            except Exception:
+                pass
 
     def _editor_loaded() -> bool:
         try:
@@ -822,7 +835,7 @@ def post_to_naver_blog(browser: Browser, cfg: dict, title: str, content: str,
         tried.add(url)
         driver.get(url)
         time.sleep(5)
-        _close_extra_tabs()
+        _focus_naver_tab()
 
         # 글쓰기 화면이 mainFrame iframe 안에 있는 구형 구조 대응
         try:
