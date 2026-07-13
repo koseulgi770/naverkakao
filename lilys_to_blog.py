@@ -38,8 +38,17 @@ DEFAULT_CONFIG = {
     "max_fetch_count": 10,
     "lilys_report_name": "",
     "chrome_profile_dir": os.path.join(BASE_DIR, "chrome_profile"),
-    "publish_mode": "publish",  # "publish"(즉시 발행) 또는 "draft"(임시저장)
+    "publish_mode": "publish",  # "publish"(발행) / "draft"(임시저장) / "schedule"(예약발행)
+    "schedule_time": "",        # 예약발행 시각 (예: 2026-07-15 09:00)
 }
+
+# 발행 방식 코드 ↔ 화면 표시 이름
+PUBLISH_MODE_LABELS = {
+    "publish": "📤 발행",
+    "draft": "💾 임시저장",
+    "schedule": "⏰ 예약발행",
+}
+PUBLISH_MODE_CODES = {v: k for k, v in PUBLISH_MODE_LABELS.items()}
 
 def load_config() -> dict:
     cfg = dict(DEFAULT_CONFIG)
@@ -179,15 +188,51 @@ def lilys_poll_result(api_key: str, request_id: str, log,
     raise RuntimeError("제한 시간 내에 요약 결과를 받지 못했습니다.")
 
 def markdown_to_plain(text: str) -> str:
-    """블로그 붙여넣기용으로 마크다운 표기를 가볍게 정리한다."""
-    text = re.sub(r"```.*?```", "", text, flags=re.S)      # 코드블록 제거
-    text = re.sub(r"^#{1,6}\s*", "", text, flags=re.M)     # 헤딩 기호
-    text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)           # 굵게
-    text = re.sub(r"\*(.+?)\*", r"\1", text)               # 기울임
-    text = re.sub(r"^[-*]\s+", "· ", text, flags=re.M)     # 리스트 불릿
-    text = re.sub(r"\[(.+?)\]\((.+?)\)", r"\1 (\2)", text) # 링크
+    """블로그 붙여넣기용으로 원문을 정리·변형한다.
+    - [1], [2, 3] 같은 각주 번호와 [12:34] 타임스탬프 제거
+    - 마크다운 헤딩(소제목)은 '> 제목' 으로 바꿔 발행 시 인용구 블록으로 삽입
+    """
+    text = re.sub(r"```.*?```", "", text, flags=re.S)              # 코드블록 제거
+    text = re.sub(r"\[(.+?)\]\((.+?)\)", r"\1", text)              # 링크는 텍스트만
+    text = re.sub(r"\[\d+(?:[,\s]+\d+)*\]", "", text)              # [1], [2, 3] 각주 제거
+    text = re.sub(r"\[?\b\d{1,2}:\d{2}(?::\d{2})?\]?", "", text)   # 12:34 타임스탬프 제거
+    text = re.sub(r"^#{1,6}\s*(.+)$", r"> \1", text, flags=re.M)   # 헤딩 → 인용구 후보
+    text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)                   # 굵게
+    text = re.sub(r"\*(.+?)\*", r"\1", text)                       # 기울임
+    text = re.sub(r"^[-*]\s+", "· ", text, flags=re.M)             # 리스트 불릿
+    text = re.sub(r"[ \t]{2,}", " ", text)                         # 연속 공백 정리
+    text = re.sub(r"[ \t]+([.,!?。，])", r"\1", text)              # 구두점 앞 공백 제거
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
+
+def looks_like_quote(line: str) -> bool:
+    """인용구 블록으로 넣을 줄인지 감지 (> 마커 또는 양끝 따옴표)."""
+    s = line.strip()
+    if not s:
+        return False
+    if s.startswith(">"):
+        return True
+    s2 = s.rstrip(".。!?！？,，")
+    pairs = [('"', '"'), ('“', '”'), ("'", "'"), ('‘', '’'),
+             ('「', '」'), ('『', '』'), ('《', '》')]
+    for a, b in pairs:
+        if s2.startswith(a) and s2.endswith(b) and len(s2) > 4:
+            return True
+    return False
+
+def _strip_quote_markers(text: str) -> str:
+    """인용 마커(>, 양끝 따옴표)를 제거한 본문만 남긴다."""
+    cleaned = text.lstrip(">").strip().split("\n")[0].strip()
+    tail = ""
+    c = cleaned
+    while c and c[-1] in ".。!?！？,，":
+        tail = c[-1] + tail
+        c = c[:-1]
+    for a, b in [('"', '"'), ('“', '”'), ("'", "'"), ('‘', '’'),
+                 ('「', '」'), ('『', '』'), ('《', '》')]:
+        if c.startswith(a) and c.endswith(b):
+            return c[len(a):-len(b)].strip() + tail
+    return cleaned + tail if c != cleaned else cleaned
 
 # ──────────────────────────────────────────────
 # Selenium 브라우저 (네이버 발행 + Lilys 라이브러리 감시 공용)
@@ -317,6 +362,121 @@ def _click_if_exists(driver, css: str) -> bool:
     except Exception:
         pass
     return False
+
+def _click_toolbar_button(driver, selectors) -> bool:
+    """에디터 툴바 버튼을 클릭. 여러 selector 중 보이는 첫 번째."""
+    from selenium.webdriver.common.by import By
+    for sel in selectors:
+        try:
+            for el in driver.find_elements(By.CSS_SELECTOR, sel):
+                if el.is_displayed():
+                    driver.execute_script("arguments[0].click();", el)
+                    return True
+        except Exception:
+            continue
+    return False
+
+def insert_quote_block(driver, text: str) -> bool:
+    """SmartEditor 인용구 블록에 한 줄을 넣고 블록을 빠져나온다."""
+    import pyperclip
+
+    cleaned = _strip_quote_markers(text)
+    if not cleaned:
+        return False
+
+    opened = _click_toolbar_button(driver, [
+        "button.se-quotation-toolbar-button",
+        'button[data-name="quotation"]',
+        'button[aria-label*="인용구"]',
+    ])
+    if opened:
+        time.sleep(0.35)
+        _click_toolbar_button(driver, [
+            "button.se-quotation-line-button",
+            'button[class*="quotation"][class*="line"]',
+            "ul.se-toolbar-option-quotation li:first-child button",
+        ])
+        time.sleep(0.35)
+
+    pyperclip.copy(cleaned)
+    safe_hotkey(driver, "ctrl", "v")
+    time.sleep(0.2)
+    safe_press(driver, "enter")   # 인용 블록 종료
+    time.sleep(0.1)
+    safe_press(driver, "enter")   # 다음 일반 문단 시작
+    time.sleep(0.15)
+    return True
+
+def _set_schedule_and_publish(driver, schedule_str: str, log) -> bool:
+    """발행 레이어에서 '예약'을 선택하고 시간을 입력한다.
+    schedule_str 형식: 'YYYY-MM-DD HH:MM' (분은 10분 단위로 반올림됨)"""
+    import pyperclip
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import Select
+
+    m = re.match(r"(\d{4})-(\d{1,2})-(\d{1,2})\s+(\d{1,2}):(\d{1,2})",
+                 schedule_str.strip())
+    if not m:
+        log("⚠️ 예약 시간 형식이 올바르지 않습니다 (예: 2026-07-15 09:00)")
+        return False
+    yy, mo, dd, hh, mi = (int(g) for g in m.groups())
+    mi = min(50, round(mi / 10) * 10)  # 네이버는 10분 단위
+
+    # '예약' 라디오/라벨 클릭
+    clicked = False
+    for el in driver.find_elements(By.XPATH, "//*[contains(text(), '예약')]"):
+        try:
+            if el.is_displayed():
+                el.click()
+                time.sleep(1.5)
+                clicked = True
+                break
+        except Exception:
+            continue
+    if not clicked:
+        log("⚠️ 발행 레이어에서 '예약' 옵션을 찾지 못했습니다")
+        return False
+
+    # 날짜 입력 (보이는 마지막 input 에 yyyy.MM.dd)
+    try:
+        inputs = [i for i in driver.find_elements(By.CSS_SELECTOR, "input")
+                  if i.is_displayed()]
+        if inputs:
+            di = inputs[-1]
+            di.click()
+            time.sleep(0.3)
+            pyperclip.copy(f"{yy}.{mo:02d}.{dd:02d}")
+            safe_hotkey(driver, "ctrl", "a")
+            safe_hotkey(driver, "ctrl", "v")
+            time.sleep(0.5)
+            safe_press(driver, "escape")  # 달력 팝업 닫기
+            time.sleep(0.3)
+    except Exception as e:
+        log(f"⚠️ 예약 날짜 입력 실패(계속 진행): {e}")
+
+    # 시/분 select 설정
+    try:
+        sels = [s for s in driver.find_elements(By.TAG_NAME, "select")
+                if s.is_displayed()]
+        if len(sels) >= 2:
+            for sel_el, val in ((sels[0], hh), (sels[1], mi)):
+                sel = Select(sel_el)
+                for cand in (f"{val:02d}", str(val)):
+                    try:
+                        sel.select_by_visible_text(cand)
+                        break
+                    except Exception:
+                        try:
+                            sel.select_by_value(cand)
+                            break
+                        except Exception:
+                            continue
+            time.sleep(0.3)
+    except Exception as e:
+        log(f"⚠️ 예약 시각 선택 실패(계속 진행): {e}")
+
+    log(f"⏰ 예약 시간 설정: {yy}-{mo:02d}-{dd:02d} {hh:02d}:{mi:02d}")
+    return True
 
 def _dismiss_editor_popups(driver):
     """작성 중이던 글 팝업 / 도움말 패널 등을 닫는다."""
@@ -519,7 +679,7 @@ def post_to_naver_blog(browser: Browser, cfg: dict, title: str, content: str,
         driver.switch_to.default_content()
         return False
 
-    # ── 본문 입력 (한 줄씩 붙여넣기 → 문단 유지) ──
+    # ── 본문 입력 (한 줄씩 붙여넣기 → 문단 유지, 인용구 자동 삽입) ──
     import pyperclip
     wrote_any = False
     for raw_line in content.split("\n"):
@@ -528,7 +688,14 @@ def post_to_naver_blog(browser: Browser, cfg: dict, title: str, content: str,
             safe_press(driver, "enter")
             time.sleep(0.05)
             continue
-        pyperclip.copy(line)
+        if looks_like_quote(line):
+            try:
+                insert_quote_block(driver, line)
+                wrote_any = True
+                continue
+            except Exception:
+                pass  # 인용구 삽입 실패 시 일반 문단으로
+        pyperclip.copy(_strip_quote_markers(line) if line.startswith(">") else line)
         safe_hotkey(driver, "ctrl", "v")
         safe_press(driver, "enter")
         time.sleep(0.1)
@@ -583,6 +750,11 @@ def post_to_naver_blog(browser: Browser, cfg: dict, title: str, content: str,
                 raise RuntimeError("발행 버튼을 찾지 못했습니다")
             time.sleep(2)
 
+            # 예약발행이면 발행 레이어에서 예약 옵션 + 시간 설정
+            if cfg.get("publish_mode") == "schedule":
+                _set_schedule_and_publish(
+                    driver, cfg.get("schedule_time", ""), log)
+
             confirm_selectors = [
                 "button.se-popup-button-confirm",
                 "button.confirm_btn__WEaBq",
@@ -597,7 +769,10 @@ def post_to_naver_blog(browser: Browser, cfg: dict, title: str, content: str,
                 log("⚠️ 에디터에 머물러 있어 발행을 재시도합니다...")
                 _click_first(confirm_selectors)
                 time.sleep(3)
-            log("🚀 발행 완료!")
+            if cfg.get("publish_mode") == "schedule":
+                log("⏰ 예약발행 완료!")
+            else:
+                log("🚀 발행 완료!")
     except Exception as e:
         log(f"❌ 발행/저장 실패: {e}")
         driver.switch_to.default_content()
@@ -1256,7 +1431,7 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Lilys AI → 네이버 블로그 자동 포스팅")
-        self.geometry("720x740")
+        self.geometry("720x800")
         self.resizable(False, False)
         self.configure(bg=BG)
 
@@ -1285,18 +1460,26 @@ class App(tk.Tk):
             ("max_fetch_count",        "가져올 노트 개수 (최대)", False),
             ("lilys_report_name",      "가져올 확장 리포트 이름 (비우면 요약)", False),
             ("chrome_profile_dir",     "크롬 프로필 폴더",      False),
-            ("publish_mode",           "발행 방식 (publish / draft)", False),
+            ("publish_mode",           "발행 방식",             False),
+            ("schedule_time",          "예약 시간 (예: 2026-07-15 09:00)", False),
         ]
+        from tkinter import ttk
         for i, (key, label, secret) in enumerate(fields):
             tk.Label(card, text=label, bg=SURFACE, fg=FG_DIM,
                      font=FONT_M, width=26, anchor="w").grid(
                 row=i, column=0, padx=(12, 4), pady=4, sticky="w")
             var = tk.StringVar()
             self._cfg_vars[key] = var
-            tk.Entry(card, textvariable=var, show="*" if secret else "",
-                     bg=BG, fg=FG, insertbackground=FG,
-                     relief="flat", font=FONT_M, width=40).grid(
-                row=i, column=1, padx=(4, 12), pady=4)
+            if key == "publish_mode":
+                combo = ttk.Combobox(card, textvariable=var, state="readonly",
+                                     values=list(PUBLISH_MODE_LABELS.values()),
+                                     font=FONT_M, width=38)
+                combo.grid(row=i, column=1, padx=(4, 12), pady=4)
+            else:
+                tk.Entry(card, textvariable=var, show="*" if secret else "",
+                         bg=BG, fg=FG, insertbackground=FG,
+                         relief="flat", font=FONT_M, width=40).grid(
+                    row=i, column=1, padx=(4, 12), pady=4)
 
         self._load_cfg_to_ui()
 
@@ -1374,13 +1557,22 @@ class App(tk.Tk):
     def _load_cfg_to_ui(self):
         cfg = load_config()
         for k, var in self._cfg_vars.items():
-            var.set(str(cfg.get(k, "")))
+            if k == "publish_mode":
+                var.set(PUBLISH_MODE_LABELS.get(cfg.get(k, "publish"),
+                                                PUBLISH_MODE_LABELS["publish"]))
+            else:
+                var.set(str(cfg.get(k, "")))
 
     def _save_cfg(self) -> dict:
         cfg = load_config()
         for k, var in self._cfg_vars.items():
             val = var.get().strip()
-            cfg[k] = int(val) if k in ("check_interval_minutes", "max_fetch_count") and val.isdigit() else val
+            if k == "publish_mode":
+                cfg[k] = PUBLISH_MODE_CODES.get(val, "publish")
+            elif k in ("check_interval_minutes", "max_fetch_count") and val.isdigit():
+                cfg[k] = int(val)
+            else:
+                cfg[k] = val
         save_config(cfg)
         self._append_log("💾 설정이 저장되었습니다")
         return cfg
