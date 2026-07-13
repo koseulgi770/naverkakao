@@ -30,6 +30,7 @@ POSTED_FILE = os.path.join(BASE_DIR, "posted_notes.json")
 DEFAULT_CONFIG = {
     "naver_id": "",
     "naver_pw": "",
+    "naver_blog_id": "",
     "lilys_api_key": "",
     "model_type": "gpt-4",
     "result_language": "ko",
@@ -484,6 +485,51 @@ def _dismiss_editor_popups(driver):
                 "button.se-cancel", "button.se-help-panel-close-button"):
         _click_if_exists(driver, css)
 
+def _dump_naver_debug(driver, log):
+    """에디터를 못 열었을 때 화면 상태를 파일로 저장해 원인 분석을 돕는다."""
+    from selenium.webdriver.common.by import By
+    try:
+        try:
+            driver.switch_to.default_content()
+        except Exception:
+            pass
+        lines = [f"URL: {driver.current_url}", f"TITLE: {driver.title}", ""]
+        try:
+            frames = driver.find_elements(By.TAG_NAME, "iframe")
+            lines.append("[iframe 목록]")
+            for f in frames:
+                lines.append(f"- id={f.get_attribute('id')} name={f.get_attribute('name')} "
+                             f"src={(f.get_attribute('src') or '')[:100]}")
+        except Exception:
+            pass
+        try:
+            lines.append("")
+            lines.append("[보이는 버튼/링크 텍스트]")
+            texts = set()
+            for el in driver.find_elements(By.CSS_SELECTOR, "button, a"):
+                t = (el.text or "").strip().replace("\n", " / ")[:50]
+                if t and t not in texts and el.is_displayed():
+                    texts.add(t)
+                    lines.append(f"- {t}")
+                if len(texts) > 60:
+                    break
+        except Exception:
+            pass
+        try:
+            body_text = driver.execute_script("return document.body.innerText") or ""
+            lines += ["", "[화면 텍스트 앞부분]", body_text[:2000]]
+        except Exception:
+            pass
+        txt_path = os.path.join(BASE_DIR, "naver_debug.txt")
+        with open(txt_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines))
+        with open(os.path.join(BASE_DIR, "naver_debug.html"), "w", encoding="utf-8") as f:
+            f.write(driver.page_source)
+        log(f"🛠 네이버 진단 파일을 저장했습니다: {txt_path}")
+        log("   (이 파일 내용을 보여주시면 화면 구조에 맞춰 수정할 수 있습니다)")
+    except Exception as e:
+        log(f"⚠️ 진단 파일 저장 실패: {e}")
+
 def ensure_naver_login(driver, cfg, log) -> bool:
     """
     네이버 로그인 상태를 확인하고, 필요하면 설정의 ID/PW로 자동 로그인한다.
@@ -582,43 +628,85 @@ def post_to_naver_blog(browser: Browser, cfg: dict, title: str, content: str,
         return False
 
     log("🌐 네이버 블로그 글쓰기 페이지 이동 중...")
-    driver.get("https://blog.naver.com/GoBlogWrite.naver")
-    time.sleep(5)
 
-    # 새 탭이 열렸으면 에디터 탭만 남기기
-    handles = list(driver.window_handles)
-    if len(handles) > 1:
-        editor_tab = handles[-1]
-        for h in handles:
-            if h != editor_tab:
-                try:
-                    driver.switch_to.window(h)
-                    driver.close()
-                except Exception:
-                    pass
-        driver.switch_to.window(editor_tab)
+    def _close_extra_tabs():
+        handles = list(driver.window_handles)
+        if len(handles) > 1:
+            editor_tab = handles[-1]
+            for h in handles:
+                if h != editor_tab:
+                    try:
+                        driver.switch_to.window(h)
+                        driver.close()
+                    except Exception:
+                        pass
+            driver.switch_to.window(editor_tab)
 
-    # 글쓰기 화면은 mainFrame iframe 안에 있음 (없는 환경도 있음)
-    try:
-        driver.switch_to.default_content()
-    except Exception:
-        pass
-    try:
-        iframe = WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.ID, "mainFrame")))
-        driver.switch_to.frame(iframe)
-        time.sleep(1)
-    except Exception:
-        log("ℹ️ mainFrame 없음, 에디터에 직접 접근합니다")
+    def _editor_loaded() -> bool:
+        try:
+            WebDriverWait(driver, 12).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR,
+                    'div.se-title-text, span.se-placeholder, '
+                    'div.se-section-documentTitle, div[contenteditable="true"]')))
+            return True
+        except Exception:
+            return False
 
-    _dismiss_editor_popups(driver)
+    # 에디터 접근 경로 후보: 블로그ID가 있으면 새 에디터 주소 우선
+    blog_id = (cfg.get("naver_blog_id") or "").strip().strip("/")
+    candidates = []
+    if blog_id:
+        candidates.append(f"https://blog.naver.com/{blog_id}/postwrite")
+    candidates.append("https://blog.naver.com/GoBlogWrite.naver")
 
-    try:
-        WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located(
-                (By.CSS_SELECTOR, 'div.se-title-text, div[contenteditable="true"]')))
-    except Exception:
-        log("⚠️ 에디터 로드가 늦습니다 (계속 시도)")
+    editor_ready = False
+    tried = set()
+    while candidates:
+        url = candidates.pop(0)
+        if url in tried:
+            continue
+        tried.add(url)
+        driver.get(url)
+        time.sleep(5)
+        _close_extra_tabs()
+
+        # 글쓰기 화면이 mainFrame iframe 안에 있는 구형 구조 대응
+        try:
+            driver.switch_to.default_content()
+        except Exception:
+            pass
+        try:
+            iframe = WebDriverWait(driver, 6).until(
+                EC.presence_of_element_located((By.ID, "mainFrame")))
+            driver.switch_to.frame(iframe)
+            time.sleep(1)
+        except Exception:
+            pass
+
+        _dismiss_editor_popups(driver)
+        if _editor_loaded():
+            editor_ready = True
+            break
+
+        # 에디터가 아니면 현재 URL에서 블로그 ID를 추출해 새 에디터 주소로 재시도
+        cur = ""
+        try:
+            driver.switch_to.default_content()
+            cur = driver.current_url or ""
+        except Exception:
+            pass
+        m = re.search(r"blog\.naver\.com/([A-Za-z0-9_\-]+)", cur)
+        if m and m.group(1) not in ("GoBlogWrite.naver", "PostWriteForm.naver",
+                                    "gnb", "post", "section"):
+            next_url = f"https://blog.naver.com/{m.group(1)}/postwrite"
+            if next_url not in tried:
+                candidates.append(next_url)
+        log(f"ℹ️ 에디터가 아닌 화면입니다 ({cur[:80]}), 다른 경로로 재시도합니다...")
+
+    if not editor_ready:
+        log("❌ 글쓰기 에디터를 열지 못했습니다")
+        _dump_naver_debug(driver, log)
+        return False
 
     # ── 제목 입력 (여러 셀렉터 순차 시도) ──
     title_selectors = [
@@ -640,6 +728,7 @@ def post_to_naver_blog(browser: Browser, cfg: dict, title: str, content: str,
             continue
     if not title_ok:
         log("❌ 제목 입력 실패 (에디터 구조가 변경되었을 수 있음)")
+        _dump_naver_debug(driver, log)
         driver.switch_to.default_content()
         return False
     log(f"✏️ 제목 입력 완료: {title[:30]}")
@@ -1452,6 +1541,7 @@ class App(tk.Tk):
         fields = [
             ("naver_id",               "네이버 ID (자동 로그인용)", False),
             ("naver_pw",               "네이버 비밀번호",       True),
+            ("naver_blog_id",          "블로그 ID (blog.naver.com/여기)", False),
             ("lilys_api_key",          "Lilys API Key (선택, 유튜브 직접 요약용)", True),
             ("model_type",             "요약 모델 (gpt-3.5 / gpt-4)", False),
             ("result_language",        "요약 언어 (ko / en)",   False),
