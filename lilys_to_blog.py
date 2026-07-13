@@ -41,6 +41,8 @@ DEFAULT_CONFIG = {
     "lilys_summary_length": "기본",
     "transform_mode": "clean",
     "paragraph_style": "airy",
+    "line_max_chars": 30,
+    "use_quotes": "on",
     "text_align": "left",
     "chrome_profile_dir": os.path.join(BASE_DIR, "chrome_profile"),
     "publish_mode": "publish",  # "publish"(발행) / "draft"(임시저장) / "schedule"(예약발행)
@@ -64,6 +66,13 @@ TRANSFORM_MODE_CODES = {v: k for k, v in TRANSFORM_MODE_LABELS.items()}
 
 # Lilys 요약 길이 옵션 (노트 화면의 버튼 텍스트 그대로)
 SUMMARY_LENGTHS = ["기본", "짧게", "길게", "쉽게"]
+
+# 인용구 사용 여부
+USE_QUOTES_LABELS = {
+    "on": "💬 인용구 사용",
+    "off": "🚫 인용구 사용 안 함",
+}
+USE_QUOTES_CODES = {v: k for k, v in USE_QUOTES_LABELS.items()}
 
 # 본문 정렬
 TEXT_ALIGN_LABELS = {
@@ -107,7 +116,7 @@ def _split_long_line(text: str, max_len: int = 40) -> list[str]:
             out.append(cur)
     return out
 
-def airy_format(text: str) -> str:
+def airy_format(text: str, max_len: int = 30) -> str:
     """블로그 가독성용: 문장을 짧은 줄로 나누고 줄 사이에 여백을 넣는다."""
     blocks = []
     for raw_line in text.split("\n"):
@@ -117,7 +126,7 @@ def airy_format(text: str) -> str:
         if looks_like_quote(line):
             blocks.append(line)  # 인용구는 자르지 않음
         else:
-            blocks.extend(_split_long_line(line))
+            blocks.extend(_split_long_line(line, max_len=max_len))
     return "\n\n".join(blocks)
 
 def prepare_body(cfg: dict, body: str) -> str:
@@ -126,7 +135,7 @@ def prepare_body(cfg: dict, body: str) -> str:
         return body.strip()
     text = markdown_to_plain(body)
     if cfg.get("paragraph_style", "airy") == "airy":
-        text = airy_format(text)
+        text = airy_format(text, max_len=_cfg_int(cfg, "line_max_chars", 30))
     return text
 
 def load_config() -> dict:
@@ -947,7 +956,9 @@ def post_to_naver_blog(browser: Browser, cfg: dict, title: str, content: str,
             safe_press(driver, "enter")
             time.sleep(0.05)
             continue
-        if cfg.get("transform_mode") != "raw" and looks_like_quote(line):
+        if (cfg.get("transform_mode") != "raw"
+                and cfg.get("use_quotes", "on") != "off"
+                and looks_like_quote(line)):
             try:
                 insert_quote_block(driver, line)
                 wrote_any = True
@@ -1790,7 +1801,7 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Lilys AI → 네이버 블로그 자동 포스팅")
-        self.geometry("740x920")
+        self.geometry("740x960")
         self.resizable(False, False)
         self.configure(bg=BG)
 
@@ -1825,6 +1836,8 @@ class App(tk.Tk):
             ("lilys_summary_length",   "요약 길이",             False),
             ("transform_mode",         "본문 변형",             False),
             ("paragraph_style",        "문단 나누기",           False),
+            ("line_max_chars",         "한 줄 글자 수 (줄바꿈 기준)", False),
+            ("use_quotes",             "인용구",                False),
             ("text_align",             "본문 정렬",             False),
             ("chrome_profile_dir",     "크롬 프로필 폴더",      False),
             ("publish_mode",           "발행 방식",             False),
@@ -1841,6 +1854,8 @@ class App(tk.Tk):
                 "publish_mode": list(PUBLISH_MODE_LABELS.values()),
                 "transform_mode": list(TRANSFORM_MODE_LABELS.values()),
                 "paragraph_style": list(PARAGRAPH_LABELS.values()),
+                "line_max_chars": ["20", "25", "30", "35", "40", "50"],
+                "use_quotes": list(USE_QUOTES_LABELS.values()),
                 "text_align": list(TEXT_ALIGN_LABELS.values()),
                 "lilys_summary_length": SUMMARY_LENGTHS,
             }.get(key)
@@ -1943,6 +1958,9 @@ class App(tk.Tk):
             elif k == "text_align":
                 var.set(TEXT_ALIGN_LABELS.get(cfg.get(k, "left"),
                                               TEXT_ALIGN_LABELS["left"]))
+            elif k == "use_quotes":
+                var.set(USE_QUOTES_LABELS.get(cfg.get(k, "on"),
+                                              USE_QUOTES_LABELS["on"]))
             elif k == "lilys_summary_length":
                 v = cfg.get(k, "기본")
                 var.set(v if v in SUMMARY_LENGTHS else "기본")
@@ -1961,7 +1979,10 @@ class App(tk.Tk):
                 cfg[k] = PARAGRAPH_CODES.get(val, "airy")
             elif k == "text_align":
                 cfg[k] = TEXT_ALIGN_CODES.get(val, "left")
-            elif k in ("check_interval_minutes", "max_fetch_count") and val.isdigit():
+            elif k == "use_quotes":
+                cfg[k] = USE_QUOTES_CODES.get(val, "on")
+            elif k in ("check_interval_minutes", "max_fetch_count",
+                       "line_max_chars") and val.isdigit():
                 cfg[k] = int(val)
             else:
                 cfg[k] = val
