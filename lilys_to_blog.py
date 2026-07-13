@@ -173,6 +173,32 @@ def save_posted(posted: set):
     with open(POSTED_FILE, "w", encoding="utf-8") as f:
         json.dump(sorted(posted), f, ensure_ascii=False, indent=2)
 
+# 크롤링한 노트 목록 캐시 (껐다 켜도 유지)
+NOTES_CACHE_FILE = os.path.join(BASE_DIR, "notes_cache.json")
+
+def load_notes_cache() -> tuple[list, str]:
+    """저장해 둔 노트 목록과 마지막 갱신 시각을 반환한다. 없으면 ([], "")."""
+    if os.path.exists(NOTES_CACHE_FILE):
+        try:
+            with open(NOTES_CACHE_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            notes = [(n[0], n[1]) for n in data.get("notes", [])]
+            return notes, data.get("updated_at", "")
+        except Exception:
+            pass
+    return [], ""
+
+def save_notes_cache(notes: list):
+    from datetime import datetime
+    try:
+        with open(NOTES_CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump({
+                "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                "notes": [[u, t] for u, t in notes],
+            }, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
 # ──────────────────────────────────────────────
 # Lilys AI 공식 API (https://reference.lilys.ai/)
 # ──────────────────────────────────────────────
@@ -1535,7 +1561,8 @@ class Worker:
                     browser, self.log, cfg.get("lilys_folder_name", ""),
                     max_notes=_cfg_int(cfg, "max_fetch_count", 10))
                 if notes:
-                    self.log(f"🔍 라이브러리에서 노트 {len(notes)}개를 찾았습니다")
+                    save_notes_cache(notes)
+                    self.log(f"🔍 라이브러리에서 노트 {len(notes)}개를 찾아 저장했습니다")
                     on_done(notes)
                 else:
                     self.log("⚠️ 라이브러리에서 노트를 찾지 못했습니다. Lilys 로그인 상태를 확인해 주세요.")
@@ -2023,10 +2050,20 @@ class App(tk.Tk):
 
     def _on_pick_from_library(self):
         cfg = self._save_cfg()
-        self._worker.fetch_notes_async(
-            cfg, lambda notes: self.after(0, self._show_note_picker, cfg, notes))
+        cached, updated_at = load_notes_cache()
+        if cached:
+            # 저장된 목록이 있으면 크롤링 없이 바로 표시 (창 안에서 새로고침 가능)
+            self.after(0, self._show_note_picker, cfg, cached, updated_at)
+        else:
+            self._worker.fetch_notes_async(
+                cfg, lambda notes: self.after(0, self._show_note_picker, cfg, notes, ""))
 
-    def _show_note_picker(self, cfg, notes):
+    def _refresh_library(self, cfg, old_win):
+        old_win.destroy()
+        self._worker.fetch_notes_async(
+            cfg, lambda notes: self.after(0, self._show_note_picker, cfg, notes, ""))
+
+    def _show_note_picker(self, cfg, notes, updated_at=""):
         """라이브러리 노트 목록: 체크로 선택, 미리보기, 상태 표시가 있는 창."""
         from tkinter import ttk
 
@@ -2037,14 +2074,21 @@ class App(tk.Tk):
 
         posted = load_posted()
 
-        # 상단: 요약/전체선택
+        # 상단: 요약/전체선택/새로고침
         top = tk.Frame(win, bg=BG)
         top.pack(fill="x", padx=16, pady=(12, 6))
         count_var = tk.StringVar(value=f"글감 {len(notes)}개 · 선택 0개")
         tk.Label(top, textvariable=count_var, bg=BG, fg=FG,
                  font=FONT_B).pack(side="left")
-        tk.Label(top, text="  (제목 클릭=체크, 🔍=오른쪽에 미리보기)", bg=BG, fg=FG_DIM,
+        cache_note = f"  (저장된 목록 · {updated_at} 기준)" if updated_at else \
+                     "  (제목 클릭=체크, 🔍=오른쪽에 미리보기)"
+        tk.Label(top, text=cache_note, bg=BG, fg=FG_DIM,
                  font=FONT_M).pack(side="left")
+        tk.Button(top, text="🔄 새로고침(다시 크롤링)", font=FONT_M,
+                  bg="#334155", fg="white", activebackground="#1e293b",
+                  activeforeground="white", relief="flat",
+                  padx=10, pady=3, cursor="hand2",
+                  command=lambda: self._refresh_library(cfg, win)).pack(side="right")
 
         # 표 스타일 (다크)
         style = ttk.Style(win)
