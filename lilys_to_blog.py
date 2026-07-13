@@ -1709,7 +1709,7 @@ class App(tk.Tk):
 
         win = tk.Toplevel(self)
         win.title("라이브러리에서 발행할 노트 선택")
-        win.geometry("820x560")
+        win.geometry("1180x600")
         win.configure(bg=BG)
 
         posted = load_posted()
@@ -1720,7 +1720,7 @@ class App(tk.Tk):
         count_var = tk.StringVar(value=f"글감 {len(notes)}개 · 선택 0개")
         tk.Label(top, textvariable=count_var, bg=BG, fg=FG,
                  font=FONT_B).pack(side="left")
-        tk.Label(top, text="  (제목 클릭=체크, 🔍=미리보기)", bg=BG, fg=FG_DIM,
+        tk.Label(top, text="  (제목 클릭=체크, 🔍=오른쪽에 미리보기)", bg=BG, fg=FG_DIM,
                  font=FONT_M).pack(side="left")
 
         # 표 스타일 (다크)
@@ -1733,8 +1733,12 @@ class App(tk.Tk):
                         foreground=FG_DIM, font=FONT_B, borderwidth=0)
         style.map("Notes.Treeview", background=[("selected", "#3b2d63")])
 
-        table_frame = tk.Frame(win, bg=BG)
-        table_frame.pack(fill="both", expand=True, padx=16)
+        # 본체: 왼쪽 표 + 오른쪽 미리보기 패널
+        body = tk.Frame(win, bg=BG)
+        body.pack(fill="both", expand=True, padx=16)
+
+        table_frame = tk.Frame(body, bg=BG)
+        table_frame.pack(side="left", fill="both", expand=True)
         cols = ("check", "num", "title", "status", "preview")
         tree = ttk.Treeview(table_frame, columns=cols, show="headings",
                             style="Notes.Treeview", selectmode="none")
@@ -1745,7 +1749,7 @@ class App(tk.Tk):
         tree.heading("preview", text="미리보기")
         tree.column("check", width=50, anchor="center", stretch=False)
         tree.column("num", width=40, anchor="center", stretch=False)
-        tree.column("title", width=520, anchor="w")
+        tree.column("title", width=430, anchor="w")
         tree.column("status", width=70, anchor="center", stretch=False)
         tree.column("preview", width=70, anchor="center", stretch=False)
 
@@ -1753,6 +1757,26 @@ class App(tk.Tk):
         tree.configure(yscrollcommand=vsb.set)
         tree.pack(side="left", fill="both", expand=True)
         vsb.pack(side="right", fill="y")
+
+        # 오른쪽 미리보기 패널
+        preview_frame = tk.Frame(body, bg="#16162a", width=420)
+        preview_frame.pack(side="right", fill="both", padx=(12, 0))
+        preview_frame.pack_propagate(False)
+        pv_title_var = tk.StringVar(value="미리보기")
+        tk.Label(preview_frame, textvariable=pv_title_var, bg="#16162a", fg=FG,
+                 font=FONT_B, wraplength=390, justify="left").pack(
+            fill="x", padx=12, pady=(12, 6))
+        pv_box = scrolledtext.ScrolledText(
+            preview_frame, bg="#0f0f1a", fg=FG, font=FONT_M,
+            relief="flat", wrap="word", state="disabled")
+        pv_box.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+
+        def _set_preview(t, body_text):
+            pv_title_var.set(t[:120] if t else "미리보기")
+            pv_box.config(state="normal")
+            pv_box.delete("1.0", "end")
+            pv_box.insert("1.0", body_text)
+            pv_box.config(state="disabled")
 
         checked: dict = {}      # iid -> bool
         url_by_iid: dict = {}   # iid -> (url, title)
@@ -1773,24 +1797,21 @@ class App(tk.Tk):
             tree.set(iid, "check", "☑" if checked[iid] else "☐")
             _update_count()
 
+        preview_cache: dict = {}  # url -> (제목, 본문)
+
         def _show_preview(iid):
             url, title = url_by_iid[iid]
+            if url in preview_cache:
+                t, b = preview_cache[url]
+                _set_preview(t, b)
+                return
+            _set_preview(title, "⏳ 미리보기를 불러오는 중입니다...")
 
             def _on_ready(t, body):
                 def _do():
-                    pv = tk.Toplevel(win)
-                    pv.title(f"미리보기 — {t[:40]}")
-                    pv.geometry("640x560")
-                    pv.configure(bg=BG)
-                    tk.Label(pv, text=t, bg=BG, fg=FG, font=FONT_B,
-                             wraplength=600, justify="left").pack(
-                        fill="x", padx=16, pady=(12, 6))
-                    box = scrolledtext.ScrolledText(
-                        pv, bg=SURFACE, fg=FG, font=FONT_M,
-                        relief="flat", wrap="word")
-                    box.pack(fill="both", expand=True, padx=16, pady=(0, 12))
-                    box.insert("1.0", markdown_to_plain(body))
-                    box.config(state="disabled")
+                    plain = markdown_to_plain(body)
+                    preview_cache[url] = (t, plain)
+                    _set_preview(t, plain)
                 self.after(0, _do)
 
             self._worker.preview_note(cfg, url, title, _on_ready)
