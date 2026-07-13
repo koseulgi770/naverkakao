@@ -40,6 +40,12 @@ DEFAULT_CONFIG = {
     "lilys_report_name": "",
     "lilys_summary_length": "기본",
     "transform_mode": "clean",
+    "ai_provider": "off",
+    "openai_key": "",
+    "gpt_model": "gpt-4o",
+    "gemini_key": "",
+    "gemini_model": "gemini-2.5-flash",
+    "ai_prompt": "",
     "paragraph_style": "airy",
     "line_max_chars": 30,
     "use_quotes": "on",
@@ -56,6 +62,14 @@ PUBLISH_MODE_LABELS = {
     "schedule": "⏰ 예약발행",
 }
 PUBLISH_MODE_CODES = {v: k for k, v in PUBLISH_MODE_LABELS.items()}
+
+# AI 재작성 제공자
+AI_PROVIDER_LABELS = {
+    "off": "🚫 사용 안 함 (Lilys 원본)",
+    "gpt": "🟢 GPT (OpenAI)",
+    "gemini": "🔵 Gemini (Google)",
+}
+AI_PROVIDER_CODES = {v: k for k, v in AI_PROVIDER_LABELS.items()}
 
 # 본문 변형 방식
 TRANSFORM_MODE_LABELS = {
@@ -347,6 +361,103 @@ def _strip_quote_markers(text: str) -> str:
         if c.startswith(a) and c.endswith(b):
             return c[len(a):-len(b)].strip() + tail
     return cleaned + tail if c != cleaned else cleaned
+
+# ──────────────────────────────────────────────
+# AI 재작성 (GPT / Gemini)
+# ──────────────────────────────────────────────
+DEFAULT_REWRITE_PROMPT = (
+    "너는 블로그 글을 잘 쓰는 전문 작가야. 아래 원문을 참고해서 "
+    "네이버 블로그에 올릴 글을 새로 써줘.\n"
+    "규칙:\n"
+    "- 자연스러운 한국어 존댓말, 친근한 블로거 말투\n"
+    "- 첫 줄은 클릭을 부르는 제목 한 줄 (제목: 접두어 없이 제목만)\n"
+    "- 소제목은 줄 앞에 '## ' 를 붙여 구분\n"
+    "- 핵심 문장은 따옴표로 감싸 인용구로 강조\n"
+    "- 원문의 각주 번호[1], 타임스탬프는 넣지 마\n"
+    "- 마크다운 표/코드블록/링크문법은 쓰지 마\n"
+    "- 사실을 지어내지 말고 원문 범위 안에서만 써\n\n"
+    "원문:\n{content}"
+)
+
+def call_openai_text(api_key: str, prompt: str, model: str = "gpt-4o") -> str:
+    from openai import OpenAI
+    client = OpenAI(api_key=api_key, timeout=180.0, max_retries=2)
+    resp = client.chat.completions.create(
+        model=model,
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=2400,
+    )
+    text = (resp.choices[0].message.content or "").strip()
+    if not text:
+        raise RuntimeError("AI 응답이 비어 있습니다")
+    return text
+
+def call_gemini_text(api_key: str, prompt: str, model: str = "gemini-2.5-flash") -> str:
+    import google.genai as genai
+    fallback = ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite"]
+    chain = fallback[fallback.index(model):] if model in fallback else [model]
+    last_error = None
+    for try_model in chain:
+        try:
+            client = genai.Client(api_key=api_key)
+            resp = client.models.generate_content(model=try_model, contents=prompt)
+            text = (getattr(resp, "text", "") or "").strip()
+            if text:
+                return text
+            raise RuntimeError("Gemini 응답이 비어 있습니다")
+        except Exception as e:
+            last_error = e
+            s = str(e)
+            if ("503" in s or "429" in s or "overloaded" in s.lower()
+                    or "RESOURCE_EXHAUSTED" in s) and try_model != chain[-1]:
+                time.sleep(1)
+                continue
+            time.sleep(2)
+    raise RuntimeError(f"Gemini 연결 실패: {last_error}")
+
+def ai_rewrite(cfg: dict, title: str, body: str, log) -> tuple[str, str]:
+    """AI로 글을 재작성해 (제목, 본문)을 반환한다. 실패 시 원본을 그대로 돌려준다."""
+    provider = cfg.get("ai_provider", "off")
+    if provider == "off":
+        return title, body
+
+    prompt_tmpl = cfg.get("ai_prompt", "").strip() or DEFAULT_REWRITE_PROMPT
+    if "{content}" not in prompt_tmpl:
+        prompt_tmpl += "\n\n원문:\n{content}"
+    source = f"제목: {title}\n\n{body}" if title else body
+    prompt = prompt_tmpl.replace("{content}", source[:12000])
+
+    try:
+        if provider == "gpt":
+            key = (cfg.get("openai_key") or "").strip()
+            if not key:
+                log("⚠️ OpenAI API 키가 없어 AI 재작성을 건너뜁니다")
+                return title, body
+            log("🤖 GPT로 글을 새로 생성하는 중...")
+            out = call_openai_text(key, prompt, cfg.get("gpt_model", "gpt-4o"))
+        elif provider == "gemini":
+            key = (cfg.get("gemini_key") or "").strip()
+            if not key:
+                log("⚠️ Gemini API 키가 없어 AI 재작성을 건너뜁니다")
+                return title, body
+            log("🤖 Gemini로 글을 새로 생성하는 중...")
+            out = call_gemini_text(key, prompt, cfg.get("gemini_model", "gemini-2.5-flash"))
+        else:
+            return title, body
+    except Exception as e:
+        log(f"⚠️ AI 재작성 실패({e}). 원본 내용으로 발행합니다.")
+        return title, body
+
+    # 결과의 첫 줄을 제목으로, 나머지를 본문으로 분리
+    lines = [ln for ln in out.splitlines()]
+    new_title, new_body = title, out
+    for i, ln in enumerate(lines):
+        if ln.strip():
+            new_title = re.sub(r"^(제목|title)\s*[:：]\s*", "", ln.strip(), flags=re.I)
+            new_body = "\n".join(lines[i + 1:]).strip() or out
+            break
+    log("✅ AI 재작성 완료")
+    return new_title, new_body
 
 # ──────────────────────────────────────────────
 # Selenium 브라우저 (네이버 발행 + Lilys 라이브러리 감시 공용)
@@ -1533,6 +1644,7 @@ class Worker:
                 if not title:
                     title = body.strip().splitlines()[0][:80]
                 self.step("transform")
+                title, body = ai_rewrite(cfg, title, body, self.log)
                 body = prepare_body(cfg, body) + f"\n\n원본 노트: {note_url}"
                 self.log(f"📄 노트 내용 추출 완료: {title}")
 
@@ -1610,6 +1722,7 @@ class Worker:
                         continue
                     title = title or list_title
                     self.step("transform")
+                    title, body = ai_rewrite(cfg, title, body, self.log)
                     body = prepare_body(cfg, body) + f"\n\n원본 노트: {url}"
                     ok = post_to_naver_blog(
                         browser, cfg, title, body, self.log, step=self.step)
@@ -1667,6 +1780,7 @@ class Worker:
                 if not title:
                     title = body.strip().splitlines()[0][:80]
                 self.step("transform")
+                title, body = ai_rewrite(cfg, title, body, self.log)
                 body = prepare_body(cfg, body)
                 body += f"\n\n출처 영상: {youtube_url}"
                 self.log(f"📄 요약 완료: {title}")
@@ -1730,6 +1844,7 @@ class Worker:
                                 self.log("⚠️ 본문 추출 실패, 다음 주기에 다시 시도합니다.")
                                 continue
                             title = title or list_title
+                            title, body = ai_rewrite(cfg, title, body, self.log)
                             body = prepare_body(cfg, body) + f"\n\n원본 노트: {url}"
                             ok = post_to_naver_blog(
                                 browser, cfg, title, body, self.log, step=self.step)
@@ -1828,7 +1943,7 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Lilys AI → 네이버 블로그 자동 포스팅")
-        self.geometry("740x960")
+        self.geometry("760x1040")
         self.resizable(False, False)
         self.configure(bg=BG)
 
@@ -1862,6 +1977,11 @@ class App(tk.Tk):
             ("lilys_report_name",      "가져올 확장 리포트 이름 (비우면 요약)", False),
             ("lilys_summary_length",   "요약 길이",             False),
             ("transform_mode",         "본문 변형",             False),
+            ("ai_provider",            "AI 글 새로 생성",       False),
+            ("openai_key",             "OpenAI API Key",        True),
+            ("gpt_model",              "GPT 모델",              False),
+            ("gemini_key",             "Gemini API Key",        True),
+            ("gemini_model",           "Gemini 모델",           False),
             ("paragraph_style",        "문단 나누기",           False),
             ("line_max_chars",         "한 줄 글자 수 (줄바꿈 기준)", False),
             ("use_quotes",             "인용구",                False),
@@ -1880,6 +2000,10 @@ class App(tk.Tk):
             combo_values = {
                 "publish_mode": list(PUBLISH_MODE_LABELS.values()),
                 "transform_mode": list(TRANSFORM_MODE_LABELS.values()),
+                "ai_provider": list(AI_PROVIDER_LABELS.values()),
+                "gpt_model": ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo"],
+                "gemini_model": ["gemini-2.5-flash", "gemini-2.5-pro",
+                                 "gemini-2.5-flash-lite"],
                 "paragraph_style": list(PARAGRAPH_LABELS.values()),
                 "line_max_chars": ["20", "25", "30", "35", "40", "50"],
                 "use_quotes": list(USE_QUOTES_LABELS.values()),
@@ -1979,6 +2103,9 @@ class App(tk.Tk):
             elif k == "transform_mode":
                 var.set(TRANSFORM_MODE_LABELS.get(cfg.get(k, "clean"),
                                                   TRANSFORM_MODE_LABELS["clean"]))
+            elif k == "ai_provider":
+                var.set(AI_PROVIDER_LABELS.get(cfg.get(k, "off"),
+                                               AI_PROVIDER_LABELS["off"]))
             elif k == "paragraph_style":
                 var.set(PARAGRAPH_LABELS.get(cfg.get(k, "airy"),
                                              PARAGRAPH_LABELS["airy"]))
@@ -2002,6 +2129,8 @@ class App(tk.Tk):
                 cfg[k] = PUBLISH_MODE_CODES.get(val, "publish")
             elif k == "transform_mode":
                 cfg[k] = TRANSFORM_MODE_CODES.get(val, "clean")
+            elif k == "ai_provider":
+                cfg[k] = AI_PROVIDER_CODES.get(val, "off")
             elif k == "paragraph_style":
                 cfg[k] = PARAGRAPH_CODES.get(val, "airy")
             elif k == "text_align":
