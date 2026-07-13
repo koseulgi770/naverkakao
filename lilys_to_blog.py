@@ -50,6 +50,8 @@ DEFAULT_CONFIG = {
     "line_max_chars": 30,
     "use_quotes": "on",
     "text_align": "left",
+    "image_enabled": "on",
+    "image_max": 5,
     "chrome_profile_dir": os.path.join(BASE_DIR, "chrome_profile"),
     "publish_mode": "publish",  # "publish"(발행) / "draft"(임시저장) / "schedule"(예약발행)
     "schedule_time": "",        # 예약발행 시각 (예: 2026-07-15 09:00)
@@ -915,9 +917,55 @@ def ensure_naver_login(driver, cfg, log) -> bool:
     log("❌ 시간 내에 로그인되지 않았습니다")
     return False
 
+def insert_naver_image(driver, image_path: str, log) -> bool:
+    """네이버 에디터 본문에 이미지 파일 하나를 삽입한다."""
+    from selenium.webdriver.common.by import By
+
+    abs_path = os.path.abspath(image_path)
+    # 이미지 툴바 버튼을 눌러 file input 활성화
+    for sel in ("button.se-image-toolbar-button",
+                'button[data-name="image"]',
+                'button[data-type="image"]',
+                'button[aria-label*="사진"]',
+                'button[aria-label*="이미지"]',
+                "button.se-toolbar-button-image"):
+        try:
+            btn = driver.find_element(By.CSS_SELECTOR, sel)
+            if btn.is_displayed():
+                driver.execute_script("arguments[0].click();", btn)
+                time.sleep(0.6)
+                break
+        except Exception:
+            continue
+
+    preferred = []
+    for sel in ("input.se-image-input-file",
+                'input[class*="image"][type="file"]',
+                'input[accept*="image"][type="file"]'):
+        preferred.extend(driver.find_elements(By.CSS_SELECTOR, sel))
+    all_inputs = driver.find_elements(By.CSS_SELECTOR, 'input[type="file"]')
+    seen = set()
+    for fi in preferred + list(reversed(all_inputs)):
+        try:
+            key = (fi.get_attribute("outerHTML") or "")[:200]
+            if key in seen:
+                continue
+            seen.add(key)
+            driver.execute_script(
+                "arguments[0].style.display='block';"
+                "arguments[0].style.visibility='visible';", fi)
+            fi.send_keys(abs_path)
+            time.sleep(4)  # 업로드 처리 대기
+            return True
+        except Exception:
+            continue
+    log("⚠️ 이미지 입력창을 찾지 못했습니다")
+    return False
+
 def post_to_naver_blog(browser: Browser, cfg: dict, title: str, content: str,
-                       log, step=None) -> bool:
+                       log, step=None, images=None) -> bool:
     step = step or (lambda key: None)
+    images = images or []
     """네이버 블로그 스마트에디터 ONE 에 글을 작성하고 발행/임시저장한다."""
     from selenium.webdriver.common.by import By
     from selenium.webdriver.support.ui import WebDriverWait
@@ -1112,6 +1160,19 @@ def post_to_naver_blog(browser: Browser, cfg: dict, title: str, content: str,
         driver.switch_to.default_content()
         return False
     log("✏️ 본문 입력 완료")
+
+    # 이미지 삽입 (본문 끝에 순서대로)
+    if images:
+        ok_n = 0
+        for p in images:
+            try:
+                if insert_naver_image(driver, p, log):
+                    ok_n += 1
+                    time.sleep(1)
+            except Exception as e:
+                log(f"⚠️ 이미지 삽입 실패(계속 진행): {str(e)[:60]}")
+        if ok_n:
+            log(f"🖼️ 이미지 {ok_n}개 삽입 완료")
 
     # 정렬 적용 (가운데 정렬 등)
     align = cfg.get("text_align", "left")
@@ -1533,13 +1594,78 @@ def _click_summary_length(driver, length: str, log):
     log(f"⚠️ 요약 길이 '{length}' 버튼을 찾지 못해 기본 길이로 가져옵니다")
     return False
 
+def _collect_note_images(driver, max_count: int) -> list[str]:
+    """노트 본문의 이미지/인포그래픽 URL을 수집한다 (아이콘·아바타 제외)."""
+    from selenium.webdriver.common.by import By
+
+    urls, seen = [], set()
+    for img in driver.find_elements(By.TAG_NAME, "img"):
+        try:
+            src = img.get_attribute("src") or ""
+            if not src or src in seen or src.startswith("data:"):
+                continue
+            low = src.lower()
+            # 로고·아이콘·아바타·프로필 등 잡이미지 제외
+            if any(k in low for k in ("logo", "icon", "avatar", "profile",
+                                      "favicon", "sprite", "emoji")):
+                continue
+            # 실제 콘텐츠 이미지는 어느 정도 크기가 있음
+            try:
+                w = int(img.get_attribute("naturalWidth") or 0)
+                h = int(img.get_attribute("naturalHeight") or 0)
+            except Exception:
+                w = h = 0
+            if (w and w < 200) or (h and h < 200):
+                continue
+            seen.add(src)
+            urls.append(src)
+            if len(urls) >= max_count:
+                break
+        except Exception:
+            continue
+    return urls
+
+def download_images(urls: list[str], log) -> list[str]:
+    """이미지 URL들을 임시 폴더에 내려받아 로컬 경로 목록을 반환한다."""
+    import tempfile
+    out_dir = os.path.join(tempfile.gettempdir(), "lilys_blog_imgs")
+    os.makedirs(out_dir, exist_ok=True)
+    paths = []
+    headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://lilys.ai/"}
+    for i, url in enumerate(urls):
+        try:
+            r = requests.get(url, headers=headers, timeout=20)
+            r.raise_for_status()
+            ext = ".png"
+            ct = r.headers.get("Content-Type", "")
+            if "jpeg" in ct or "jpg" in ct:
+                ext = ".jpg"
+            elif "webp" in ct:
+                ext = ".webp"
+            elif "gif" in ct:
+                ext = ".gif"
+            p = os.path.join(out_dir, f"img_{int(time.time())}_{i}{ext}")
+            with open(p, "wb") as f:
+                f.write(r.content)
+            paths.append(p)
+        except Exception as e:
+            log(f"⚠️ 이미지 내려받기 실패({i + 1}): {str(e)[:60]}")
+    return paths
+
+def _img_max(cfg: dict) -> int:
+    if cfg.get("image_enabled", "on") == "off":
+        return 0
+    return _cfg_int(cfg, "image_max", 5)
+
 def fetch_note_content(browser: Browser, note_url: str, log,
                        report_name: str = "",
-                       summary_length: str = "") -> tuple[str, str]:
+                       summary_length: str = "",
+                       image_max: int = 0) -> tuple[str, str, list]:
     """
-    노트 페이지에서 (제목, 본문 텍스트)를 추출한다.
+    노트 페이지에서 (제목, 본문 텍스트, 이미지경로목록)을 추출한다.
     report_name 이 지정되면 해당 탭(확장 리포트)을 클릭한 뒤 내용을 가져온다.
     summary_length(짧게/길게/쉽게)가 지정되면 요약 길이를 바꾼 뒤 가져온다.
+    image_max > 0 이면 그만큼 본문 이미지를 내려받아 경로로 반환한다.
     """
     from selenium.webdriver.common.by import By
 
@@ -1568,7 +1694,18 @@ def fetch_note_content(browser: Browser, note_url: str, log,
         except Exception:
             continue
 
-    return title, body
+    images = []
+    if image_max > 0:
+        try:
+            urls = _collect_note_images(driver, image_max)
+            if urls:
+                log(f"🖼️ 본문 이미지 {len(urls)}개 발견, 내려받는 중...")
+                images = download_images(urls, log)
+                log(f"🖼️ 이미지 {len(images)}개 준비 완료")
+        except Exception as e:
+            log(f"⚠️ 이미지 수집 실패: {e}")
+
+    return title, body, images
 
 # ──────────────────────────────────────────────
 # 백그라운드 워커
@@ -1635,9 +1772,10 @@ class Worker:
                 self.log(f"▶ Lilys 노트 가져오기: {note_url}")
                 self.step("extract")
                 browser = self._get_browser(cfg)
-                title, body = fetch_note_content(browser, note_url, self.log,
+                title, body, images = fetch_note_content(browser, note_url, self.log,
                         report_name=cfg.get("lilys_report_name", ""),
-                        summary_length=cfg.get("lilys_summary_length", ""))
+                        summary_length=cfg.get("lilys_summary_length", ""),
+                        image_max=_img_max(cfg))
                 if not body or len(body) < 100:
                     self.log("❌ 노트 본문을 가져오지 못했습니다. Lilys 로그인 상태와 링크를 확인해 주세요.")
                     return
@@ -1649,7 +1787,7 @@ class Worker:
                 self.log(f"📄 노트 내용 추출 완료: {title}")
 
                 ok = post_to_naver_blog(
-                    browser, cfg, title, body, self.log, step=self.step)
+                    browser, cfg, title, body, self.log, step=self.step, images=images)
                 if ok:
                     self.log("✅ 블로그 포스팅 완료")
             except Exception as e:
@@ -1713,9 +1851,10 @@ class Worker:
                     self.log(f"▶ 노트 발행 시작: {list_title}")
                     _set(url, "진행중")
                     self.step("extract")
-                    title, body = fetch_note_content(browser, url, self.log,
+                    title, body, images = fetch_note_content(browser, url, self.log,
                         report_name=cfg.get("lilys_report_name", ""),
-                        summary_length=cfg.get("lilys_summary_length", ""))
+                        summary_length=cfg.get("lilys_summary_length", ""),
+                        image_max=_img_max(cfg))
                     if not body or len(body) < 100:
                         self.log(f"⚠️ 본문 추출 실패, 건너뜁니다: {list_title}")
                         _set(url, "실패")
@@ -1725,7 +1864,7 @@ class Worker:
                     title, body = ai_rewrite(cfg, title, body, self.log)
                     body = prepare_body(cfg, body) + f"\n\n원본 노트: {url}"
                     ok = post_to_naver_blog(
-                        browser, cfg, title, body, self.log, step=self.step)
+                        browser, cfg, title, body, self.log, step=self.step, images=images)
                     if ok:
                         posted.add(url)
                         save_posted(posted)
@@ -1750,9 +1889,10 @@ class Worker:
             try:
                 self.log(f"🔎 미리보기 불러오는 중: {fallback_title}")
                 browser = self._get_browser(cfg)
-                title, body = fetch_note_content(browser, url, self.log,
+                title, body, _imgs = fetch_note_content(browser, url, self.log,
                         report_name=cfg.get("lilys_report_name", ""),
-                        summary_length=cfg.get("lilys_summary_length", ""))
+                        summary_length=cfg.get("lilys_summary_length", ""),
+                        image_max=0)
                 on_ready(title or fallback_title,
                          body or "(본문을 가져오지 못했습니다)")
             except Exception as e:
@@ -1837,9 +1977,10 @@ class Worker:
                             if url in posted:
                                 continue
                             self.log(f"🆕 새 노트 발견: {list_title}")
-                            title, body = fetch_note_content(browser, url, self.log,
+                            title, body, images = fetch_note_content(browser, url, self.log,
                         report_name=cfg.get("lilys_report_name", ""),
-                        summary_length=cfg.get("lilys_summary_length", ""))
+                        summary_length=cfg.get("lilys_summary_length", ""),
+                        image_max=_img_max(cfg))
                             if not body or len(body) < 100:
                                 self.log("⚠️ 본문 추출 실패, 다음 주기에 다시 시도합니다.")
                                 continue
@@ -1847,7 +1988,7 @@ class Worker:
                             title, body = ai_rewrite(cfg, title, body, self.log)
                             body = prepare_body(cfg, body) + f"\n\n원본 노트: {url}"
                             ok = post_to_naver_blog(
-                                browser, cfg, title, body, self.log, step=self.step)
+                                browser, cfg, title, body, self.log, step=self.step, images=images)
                             if ok:
                                 posted.add(url)
                                 save_posted(posted)
@@ -1879,6 +2020,70 @@ POST_STEPS = [
     ("write",     "작성"),
     ("publish",   "포스팅"),
 ]
+
+# 이미지 사용 여부
+IMAGE_ENABLED_LABELS = {
+    "on": "🖼️ 이미지 가져오기",
+    "off": "🚫 이미지 안 씀",
+}
+IMAGE_ENABLED_CODES = {v: k for k, v in IMAGE_ENABLED_LABELS.items()}
+
+# 단계별 설정 그룹 (탭 네비게이션용) — (설정키, 라벨, 비밀번호여부)
+STEP_FIELDS = {
+    "source": [
+        ("lilys_folder_name",      "라이브러리 폴더 이름 (비우면 전체)", False),
+        ("max_fetch_count",        "가져올 노트 개수 (최대)", False),
+        ("lilys_report_name",      "가져올 확장 리포트 이름 (비우면 요약)", False),
+        ("lilys_api_key",          "Lilys API Key (선택, 유튜브 직접 요약용)", True),
+        ("model_type",             "요약 모델 (gpt-3.5 / gpt-4)", False),
+        ("result_language",        "요약 언어 (ko / en)",   False),
+    ],
+    "extract": [
+        ("lilys_summary_length",   "요약 길이",             False),
+        ("image_enabled",          "이미지",                False),
+        ("image_max",              "가져올 이미지 개수 (최대)", False),
+    ],
+    "transform": [
+        ("transform_mode",         "본문 변형",             False),
+        ("ai_provider",            "AI 글 새로 생성",       False),
+        ("openai_key",             "OpenAI API Key",        True),
+        ("gpt_model",              "GPT 모델",              False),
+        ("gemini_key",             "Gemini API Key",        True),
+        ("gemini_model",           "Gemini 모델",           False),
+        ("paragraph_style",        "문단 나누기",           False),
+        ("line_max_chars",         "한 줄 글자 수 (줄바꿈 기준)", False),
+        ("use_quotes",             "인용구",                False),
+        ("text_align",             "본문 정렬",             False),
+    ],
+    "login": [
+        ("naver_id",               "네이버 ID (자동 로그인용)", False),
+        ("naver_pw",               "네이버 비밀번호",       True),
+        ("naver_blog_id",          "블로그 ID (blog.naver.com/여기)", False),
+        ("chrome_profile_dir",     "크롬 프로필 폴더",      False),
+    ],
+    "write": [],  # 작성 단계는 별도 설정 없음 (안내만 표시)
+    "publish": [
+        ("publish_mode",           "발행 방식",             False),
+        ("schedule_time",          "예약 시간 (예: 2026-07-15 09:00)", False),
+        ("check_interval_minutes", "라이브러리 체크 주기 (분)", False),
+    ],
+}
+
+def _combo_values_for(key):
+    return {
+        "publish_mode": list(PUBLISH_MODE_LABELS.values()),
+        "transform_mode": list(TRANSFORM_MODE_LABELS.values()),
+        "ai_provider": list(AI_PROVIDER_LABELS.values()),
+        "gpt_model": ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo"],
+        "gemini_model": ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.5-flash-lite"],
+        "paragraph_style": list(PARAGRAPH_LABELS.values()),
+        "line_max_chars": ["20", "25", "30", "35", "40", "50"],
+        "use_quotes": list(USE_QUOTES_LABELS.values()),
+        "text_align": list(TEXT_ALIGN_LABELS.values()),
+        "lilys_summary_length": SUMMARY_LENGTHS,
+        "image_enabled": list(IMAGE_ENABLED_LABELS.values()),
+        "image_max": ["3", "5", "8", "10"],
+    }.get(key)
 SURFACE  = "#2a2a3d"
 ACCENT   = "#7c3aed"
 ACCENT_H = "#6d28d9"
@@ -1898,18 +2103,31 @@ class StepBar(tk.Frame):
     C_ACTIVE  = "#16a34a"   # 진행 중(진초록 배경)
     C_PENDING = "#475569"   # 대기(회색)
 
-    def __init__(self, parent):
+    def __init__(self, parent, on_click=None):
         super().__init__(parent, bg=BG)
         self._labels = {}
+        self._on_click = on_click
         for i, (key, name) in enumerate(POST_STEPS):
             if i:
                 tk.Label(self, text="─", bg=BG, fg="#334155",
                          font=FONT_M).pack(side="left")
             lbl = tk.Label(self, text=f"{i + 1} {name}", bg=BG,
-                           fg=self.C_PENDING, font=FONT_M, padx=6, pady=2)
+                           fg=self.C_PENDING, font=FONT_M, padx=6, pady=2,
+                           cursor="hand2")
             lbl.pack(side="left")
+            if on_click:
+                lbl.bind("<Button-1>", lambda e, k=key: on_click(k))
             self._labels[key] = lbl
         self.reset()
+
+    def highlight_tab(self, active_key: str):
+        """탭 클릭 네비게이션용: 현재 보고 있는 페이지만 강조 (진행 상태와 별개)."""
+        for key, name in POST_STEPS:
+            lbl = self._labels[key]
+            if key == active_key:
+                lbl.config(fg="white", bg=self.C_ACTIVE, font=FONT_B)
+            else:
+                lbl.config(fg=self.C_PENDING, bg=BG, font=FONT_M)
 
     def reset(self):
         for i, (key, name) in enumerate(POST_STEPS):
@@ -1943,7 +2161,7 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Lilys AI → 네이버 블로그 자동 포스팅")
-        self.geometry("760x1040")
+        self.geometry("760x800")
         self.resizable(False, False)
         self.configure(bg=BG)
 
@@ -1956,83 +2174,63 @@ class App(tk.Tk):
         tk.Label(self, text="유튜브 링크를 요약하거나, Lilys 라이브러리의 새 노트를 감지해 블로그에 자동 발행합니다",
                  bg=BG, fg=FG_DIM, font=FONT_M).pack(pady=(0, 6))
 
-        self._stepbar = StepBar(self)
-        self._stepbar.pack(pady=(0, 10))
+        self._stepbar = StepBar(self, on_click=self._show_page)
+        self._stepbar.pack(pady=(0, 4))
+        tk.Label(self, text="위 단계를 눌러 각 설정으로 이동하세요",
+                 bg=BG, fg="#64748b", font=("맑은 고딕", 9)).pack(pady=(0, 8))
 
-        # 설정 카드
-        card = tk.Frame(self, bg=SURFACE)
-        card.pack(fill="x", padx=24, pady=4)
-
-        self._cfg_vars = {}
-        fields = [
-            ("naver_id",               "네이버 ID (자동 로그인용)", False),
-            ("naver_pw",               "네이버 비밀번호",       True),
-            ("naver_blog_id",          "블로그 ID (blog.naver.com/여기)", False),
-            ("lilys_api_key",          "Lilys API Key (선택, 유튜브 직접 요약용)", True),
-            ("model_type",             "요약 모델 (gpt-3.5 / gpt-4)", False),
-            ("result_language",        "요약 언어 (ko / en)",   False),
-            ("check_interval_minutes", "라이브러리 체크 주기 (분)", False),
-            ("lilys_folder_name",      "라이브러리 폴더 이름 (비우면 전체)", False),
-            ("max_fetch_count",        "가져올 노트 개수 (최대)", False),
-            ("lilys_report_name",      "가져올 확장 리포트 이름 (비우면 요약)", False),
-            ("lilys_summary_length",   "요약 길이",             False),
-            ("transform_mode",         "본문 변형",             False),
-            ("ai_provider",            "AI 글 새로 생성",       False),
-            ("openai_key",             "OpenAI API Key",        True),
-            ("gpt_model",              "GPT 모델",              False),
-            ("gemini_key",             "Gemini API Key",        True),
-            ("gemini_model",           "Gemini 모델",           False),
-            ("paragraph_style",        "문단 나누기",           False),
-            ("line_max_chars",         "한 줄 글자 수 (줄바꿈 기준)", False),
-            ("use_quotes",             "인용구",                False),
-            ("text_align",             "본문 정렬",             False),
-            ("chrome_profile_dir",     "크롬 프로필 폴더",      False),
-            ("publish_mode",           "발행 방식",             False),
-            ("schedule_time",          "예약 시간 (예: 2026-07-15 09:00)", False),
-        ]
         from tkinter import ttk
-        for i, (key, label, secret) in enumerate(fields):
-            tk.Label(card, text=label, bg=SURFACE, fg=FG_DIM,
+        self._cfg_vars = {}
+        self._yt_var = tk.StringVar()
+
+        # 단계별 설정 페이지를 한 자리(카드)에 겹쳐두고 하나만 보여준다
+        card = tk.Frame(self, bg=SURFACE, height=380)
+        card.pack(fill="x", padx=24, pady=4)
+        card.pack_propagate(False)
+        self._pages = {}
+
+        def _build_field(parent, key, label, secret, row):
+            tk.Label(parent, text=label, bg=SURFACE, fg=FG_DIM,
                      font=FONT_M, width=26, anchor="w").grid(
-                row=i, column=0, padx=(12, 4), pady=4, sticky="w")
+                row=row, column=0, padx=(12, 4), pady=4, sticky="w")
             var = tk.StringVar()
             self._cfg_vars[key] = var
-            combo_values = {
-                "publish_mode": list(PUBLISH_MODE_LABELS.values()),
-                "transform_mode": list(TRANSFORM_MODE_LABELS.values()),
-                "ai_provider": list(AI_PROVIDER_LABELS.values()),
-                "gpt_model": ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo"],
-                "gemini_model": ["gemini-2.5-flash", "gemini-2.5-pro",
-                                 "gemini-2.5-flash-lite"],
-                "paragraph_style": list(PARAGRAPH_LABELS.values()),
-                "line_max_chars": ["20", "25", "30", "35", "40", "50"],
-                "use_quotes": list(USE_QUOTES_LABELS.values()),
-                "text_align": list(TEXT_ALIGN_LABELS.values()),
-                "lilys_summary_length": SUMMARY_LENGTHS,
-            }.get(key)
-            if combo_values:
-                combo = ttk.Combobox(card, textvariable=var, state="readonly",
-                                     values=combo_values,
-                                     font=FONT_M, width=38)
-                combo.grid(row=i, column=1, padx=(4, 12), pady=4)
+            values = _combo_values_for(key)
+            if values:
+                ttk.Combobox(parent, textvariable=var, state="readonly",
+                             values=values, font=FONT_M, width=38).grid(
+                    row=row, column=1, padx=(4, 12), pady=4)
             else:
-                tk.Entry(card, textvariable=var, show="*" if secret else "",
+                tk.Entry(parent, textvariable=var, show="*" if secret else "",
                          bg=BG, fg=FG, insertbackground=FG,
                          relief="flat", font=FONT_M, width=40).grid(
-                    row=i, column=1, padx=(4, 12), pady=4)
+                    row=row, column=1, padx=(4, 12), pady=4)
+
+        for step_key, _name in POST_STEPS:
+            page = tk.Frame(card, bg=SURFACE)
+            self._pages[step_key] = page
+            row = 0
+            # 소스 선택 페이지에는 유튜브/노트 링크 입력을 함께 배치
+            if step_key == "source":
+                tk.Label(page, text="유튜브 링크 또는 Lilys 노트 링크",
+                         bg=SURFACE, fg=FG_DIM, font=FONT_M, width=26,
+                         anchor="w").grid(row=row, column=0, padx=(12, 4),
+                                          pady=4, sticky="w")
+                tk.Entry(page, textvariable=self._yt_var, bg=BG, fg=FG,
+                         insertbackground=FG, relief="flat", font=FONT_M,
+                         width=40).grid(row=row, column=1, padx=(4, 12), pady=4)
+                row += 1
+            for key, label, secret in STEP_FIELDS[step_key]:
+                _build_field(page, key, label, secret, row)
+                row += 1
+            if step_key == "write":
+                tk.Label(page, text="작성 단계는 네이버 에디터에 제목·본문·이미지를\n"
+                                    "자동으로 입력하는 과정입니다. 별도 설정은 없습니다.",
+                         bg=SURFACE, fg=FG_DIM, font=FONT_M, justify="left").grid(
+                    row=row, column=0, columnspan=2, padx=12, pady=16, sticky="w")
 
         self._load_cfg_to_ui()
-
-        # 유튜브 링크 입력 행
-        yt_frame = tk.Frame(self, bg=BG)
-        yt_frame.pack(fill="x", padx=24, pady=(12, 4))
-        tk.Label(yt_frame, text="유튜브 링크 또는 Lilys 노트 링크", bg=BG, fg=FG_DIM,
-                 font=FONT_M).pack(side="left", padx=(0, 8))
-        self._yt_var = tk.StringVar()
-        tk.Entry(yt_frame, textvariable=self._yt_var,
-                 bg=SURFACE, fg=FG, insertbackground=FG,
-                 relief="flat", font=FONT_M).pack(
-            side="left", fill="x", expand=True, ipady=4)
+        self._show_page("source")
 
         # 버튼 행 1: 설정/로그인
         btn_row1 = tk.Frame(self, bg=BG)
@@ -2093,6 +2291,14 @@ class App(tk.Tk):
         self._log_box.tag_config("warn", foreground=WARN)
         self._log_box.tag_config("info", foreground=FG_DIM)
 
+    # ── 단계별 설정 페이지 전환 ──────────────
+    def _show_page(self, step_key: str):
+        for k, page in self._pages.items():
+            page.pack_forget()
+        self._pages.get(step_key, self._pages["source"]).pack(
+            fill="x", padx=4, pady=6)
+        self._stepbar.highlight_tab(step_key)
+
     # ── 설정 ─────────────────────────────────
     def _load_cfg_to_ui(self):
         cfg = load_config()
@@ -2115,6 +2321,9 @@ class App(tk.Tk):
             elif k == "use_quotes":
                 var.set(USE_QUOTES_LABELS.get(cfg.get(k, "on"),
                                               USE_QUOTES_LABELS["on"]))
+            elif k == "image_enabled":
+                var.set(IMAGE_ENABLED_LABELS.get(cfg.get(k, "on"),
+                                                 IMAGE_ENABLED_LABELS["on"]))
             elif k == "lilys_summary_length":
                 v = cfg.get(k, "기본")
                 var.set(v if v in SUMMARY_LENGTHS else "기본")
@@ -2137,8 +2346,10 @@ class App(tk.Tk):
                 cfg[k] = TEXT_ALIGN_CODES.get(val, "left")
             elif k == "use_quotes":
                 cfg[k] = USE_QUOTES_CODES.get(val, "on")
+            elif k == "image_enabled":
+                cfg[k] = IMAGE_ENABLED_CODES.get(val, "on")
             elif k in ("check_interval_minutes", "max_fetch_count",
-                       "line_max_chars") and val.isdigit():
+                       "line_max_chars", "image_max") and val.isdigit():
                 cfg[k] = int(val)
             else:
                 cfg[k] = val
