@@ -770,7 +770,8 @@ def ensure_naver_login(driver, cfg, log) -> bool:
     return False
 
 def post_to_naver_blog(browser: Browser, cfg: dict, title: str, content: str,
-                       log) -> bool:
+                       log, step=None) -> bool:
+    step = step or (lambda key: None)
     """네이버 블로그 스마트에디터 ONE 에 글을 작성하고 발행/임시저장한다."""
     from selenium.webdriver.common.by import By
     from selenium.webdriver.support.ui import WebDriverWait
@@ -778,6 +779,7 @@ def post_to_naver_blog(browser: Browser, cfg: dict, title: str, content: str,
 
     driver = browser.get_driver()
 
+    step("login")
     if not ensure_naver_login(driver, cfg, log):
         return False
 
@@ -875,6 +877,7 @@ def post_to_naver_blog(browser: Browser, cfg: dict, title: str, content: str,
         _dump_naver_debug(driver, log)
         return False
 
+    step("write")
     # ── 제목 입력 (여러 셀렉터 순차 시도) ──
     title_selectors = [
         "span.se-placeholder",
@@ -973,6 +976,7 @@ def post_to_naver_blog(browser: Browser, cfg: dict, title: str, content: str,
 
     time.sleep(1)
 
+    step("publish")
     # ── 발행 / 임시저장 ──
     def _click_first(selectors, timeout=3):
         for sel in selectors:
@@ -1043,6 +1047,7 @@ def post_to_naver_blog(browser: Browser, cfg: dict, title: str, content: str,
         driver.switch_to.default_content()
         return False
 
+    step("done")
     driver.switch_to.default_content()
     return True
 
@@ -1423,8 +1428,9 @@ def fetch_note_content(browser: Browser, note_url: str, log,
 class Worker:
     """유튜브 단건 처리 / 라이브러리 감시 루프를 담당."""
 
-    def __init__(self, log_fn):
+    def __init__(self, log_fn, step_fn=None):
         self.log = log_fn
+        self.step = step_fn or (lambda key: None)
         self.browser: Browser | None = None
         self._watching = False
         self._watch_thread = None
@@ -1479,6 +1485,7 @@ class Worker:
                 return
             try:
                 self.log(f"▶ Lilys 노트 가져오기: {note_url}")
+                self.step("extract")
                 browser = self._get_browser(cfg)
                 title, body = fetch_note_content(browser, note_url, self.log,
                         report_name=cfg.get("lilys_report_name", ""),
@@ -1488,11 +1495,12 @@ class Worker:
                     return
                 if not title:
                     title = body.strip().splitlines()[0][:80]
+                self.step("transform")
                 body = prepare_body(cfg, body) + f"\n\n원본 노트: {note_url}"
                 self.log(f"📄 노트 내용 추출 완료: {title}")
 
                 ok = post_to_naver_blog(
-                    browser, cfg, title, body, self.log)
+                    browser, cfg, title, body, self.log, step=self.step)
                 if ok:
                     self.log("✅ 블로그 포스팅 완료")
             except Exception as e:
@@ -1509,6 +1517,7 @@ class Worker:
                 self.log("⚠️ 이미 작업이 진행 중입니다.")
                 return
             try:
+                self.step("source")
                 self.log("📥 라이브러리 목록을 불러오는 중...")
                 browser = self._get_browser(cfg)
                 notes = fetch_collection_notes(
@@ -1553,6 +1562,7 @@ class Worker:
                 for url, list_title in notes:
                     self.log(f"▶ 노트 발행 시작: {list_title}")
                     _set(url, "진행중")
+                    self.step("extract")
                     title, body = fetch_note_content(browser, url, self.log,
                         report_name=cfg.get("lilys_report_name", ""),
                         summary_length=cfg.get("lilys_summary_length", ""))
@@ -1561,9 +1571,10 @@ class Worker:
                         _set(url, "실패")
                         continue
                     title = title or list_title
+                    self.step("transform")
                     body = prepare_body(cfg, body) + f"\n\n원본 노트: {url}"
                     ok = post_to_naver_blog(
-                        browser, cfg, title, body, self.log)
+                        browser, cfg, title, body, self.log, step=self.step)
                     if ok:
                         posted.add(url)
                         save_posted(posted)
@@ -1607,6 +1618,7 @@ class Worker:
                 return
             try:
                 self.log(f"▶ 유튜브 요약 시작: {youtube_url}")
+                self.step("extract")
                 request_id = lilys_request_summary(
                     cfg["lilys_api_key"], youtube_url,
                     cfg["model_type"], cfg["result_language"])
@@ -1616,13 +1628,14 @@ class Worker:
                     cfg["lilys_api_key"], request_id, self.log)
                 if not title:
                     title = body.strip().splitlines()[0][:80]
+                self.step("transform")
                 body = prepare_body(cfg, body)
                 body += f"\n\n출처 영상: {youtube_url}"
                 self.log(f"📄 요약 완료: {title}")
 
                 browser = self._get_browser(cfg)
                 ok = post_to_naver_blog(
-                    browser, cfg, title, body, self.log)
+                    browser, cfg, title, body, self.log, step=self.step)
                 if ok:
                     self.log("✅ 블로그 포스팅 완료")
             except Exception as e:
@@ -1681,7 +1694,7 @@ class Worker:
                             title = title or list_title
                             body = prepare_body(cfg, body) + f"\n\n원본 노트: {url}"
                             ok = post_to_naver_blog(
-                                browser, cfg, title, body, self.log)
+                                browser, cfg, title, body, self.log, step=self.step)
                             if ok:
                                 posted.add(url)
                                 save_posted(posted)
@@ -1704,6 +1717,15 @@ class Worker:
 # GUI
 # ──────────────────────────────────────────────
 BG       = "#1e1e2e"
+# 포스팅 진행 단계 (스텝바)
+POST_STEPS = [
+    ("source",    "소스 선택"),
+    ("extract",   "추출"),
+    ("transform", "변형"),
+    ("login",     "로그인"),
+    ("write",     "작성"),
+    ("publish",   "포스팅"),
+]
 SURFACE  = "#2a2a3d"
 ACCENT   = "#7c3aed"
 ACCENT_H = "#6d28d9"
@@ -1716,6 +1738,54 @@ FONT_M   = ("맑은 고딕", 10)
 FONT_B   = ("맑은 고딕", 10, "bold")
 FONT_T   = ("맑은 고딕", 13, "bold")
 
+class StepBar(tk.Frame):
+    """포스팅 진행 단계 표시줄: ① 소스 선택 ─ ② 추출 ─ ... ─ ⑥ 포스팅"""
+
+    C_DONE    = "#22c55e"   # 완료(초록)
+    C_ACTIVE  = "#16a34a"   # 진행 중(진초록 배경)
+    C_PENDING = "#475569"   # 대기(회색)
+
+    def __init__(self, parent):
+        super().__init__(parent, bg=BG)
+        self._labels = {}
+        for i, (key, name) in enumerate(POST_STEPS):
+            if i:
+                tk.Label(self, text="─", bg=BG, fg="#334155",
+                         font=FONT_M).pack(side="left")
+            lbl = tk.Label(self, text=f"{i + 1} {name}", bg=BG,
+                           fg=self.C_PENDING, font=FONT_M, padx=6, pady=2)
+            lbl.pack(side="left")
+            self._labels[key] = lbl
+        self.reset()
+
+    def reset(self):
+        for i, (key, name) in enumerate(POST_STEPS):
+            self._labels[key].config(text=f"{i + 1} {name}",
+                                     fg=self.C_PENDING, bg=BG,
+                                     font=FONT_M)
+
+    def set_active(self, active_key: str):
+        """active_key 단계를 진행 중으로, 그 이전 단계는 완료로 표시."""
+        keys = [k for k, _ in POST_STEPS]
+        if active_key not in keys:
+            return
+        idx = keys.index(active_key)
+        for i, (key, name) in enumerate(POST_STEPS):
+            lbl = self._labels[key]
+            if i < idx:
+                lbl.config(text=f"✔ {name}", fg=self.C_DONE, bg=BG, font=FONT_M)
+            elif i == idx:
+                lbl.config(text=f"{i + 1} {name}", fg="white",
+                           bg=self.C_ACTIVE, font=FONT_B)
+            else:
+                lbl.config(text=f"{i + 1} {name}", fg=self.C_PENDING,
+                           bg=BG, font=FONT_M)
+
+    def all_done(self):
+        for key, name in POST_STEPS:
+            self._labels[key].config(text=f"✔ {name}", fg=self.C_DONE,
+                                     bg=BG, font=FONT_M)
+
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -1724,14 +1794,17 @@ class App(tk.Tk):
         self.resizable(False, False)
         self.configure(bg=BG)
 
-        self._worker = Worker(log_fn=self._append_log)
+        self._worker = Worker(log_fn=self._append_log, step_fn=self._on_step)
         self._build_ui()
 
     def _build_ui(self):
         tk.Label(self, text="Lilys AI → 네이버 블로그 자동 포스팅",
                  bg=BG, fg=FG, font=FONT_T).pack(pady=(16, 4))
         tk.Label(self, text="유튜브 링크를 요약하거나, Lilys 라이브러리의 새 노트를 감지해 블로그에 자동 발행합니다",
-                 bg=BG, fg=FG_DIM, font=FONT_M).pack(pady=(0, 12))
+                 bg=BG, fg=FG_DIM, font=FONT_M).pack(pady=(0, 6))
+
+        self._stepbar = StepBar(self)
+        self._stepbar.pack(pady=(0, 10))
 
         # 설정 카드
         card = tk.Frame(self, bg=SURFACE)
@@ -2118,6 +2191,17 @@ class App(tk.Tk):
             cfg = self._save_cfg()
             self._worker.start_watching(cfg)
             self._btn_watch.config(text="⏹ 라이브러리 감시 중지", bg="#7f1d1d")
+
+    # ── 진행 단계 표시 ───────────────────────
+    def _on_step(self, key: str):
+        def _do():
+            if key == "done":
+                self._stepbar.all_done()
+            elif key == "reset":
+                self._stepbar.reset()
+            else:
+                self._stepbar.set_active(key)
+        self.after(0, _do)
 
     # ── 로그 ─────────────────────────────────
     def _append_log(self, msg: str):
