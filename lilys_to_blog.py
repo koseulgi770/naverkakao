@@ -1594,8 +1594,76 @@ def _click_summary_length(driver, length: str, log):
     log(f"⚠️ 요약 길이 '{length}' 버튼을 찾지 못해 기본 길이로 가져옵니다")
     return False
 
-def _collect_note_images(driver, max_count: int) -> list[str]:
-    """노트 본문의 이미지/인포그래픽 URL을 수집한다 (아이콘·아바타 제외)."""
+def _scroll_page(driver):
+    """지연 로딩(lazy-load) 이미지를 띄우기 위해 페이지를 천천히 스크롤한다."""
+    try:
+        h = driver.execute_script("return document.body.scrollHeight") or 0
+        pos = 0
+        while pos < h:
+            driver.execute_script(f"window.scrollTo(0, {pos});")
+            time.sleep(0.4)
+            pos += 600
+            h = driver.execute_script("return document.body.scrollHeight") or h
+        driver.execute_script("window.scrollTo(0, 0);")
+        time.sleep(0.5)
+    except Exception:
+        pass
+
+def _collect_note_images(driver, max_count: int, log=None) -> list[str]:
+    """노트 본문의 이미지/인포그래픽 URL을 수집한다 (아이콘·아바타 제외).
+    <img> 의 src/srcset 과 CSS background-image 를 모두 훑고,
+    지연 로딩을 위해 먼저 페이지를 스크롤한다."""
+    from selenium.webdriver.common.by import By
+
+    _scroll_page(driver)
+
+    # 1) <img> 태그에서 실제 로딩된 주소 수집 (JS로 currentSrc 까지)
+    raw = driver.execute_script("""
+        const out = [];
+        document.querySelectorAll('img').forEach(im => {
+            const s = im.currentSrc || im.src || '';
+            const w = im.naturalWidth || 0, h = im.naturalHeight || 0;
+            if (s) out.push([s, w, h]);
+        });
+        // CSS background-image 도 수집
+        document.querySelectorAll('*').forEach(el => {
+            const bg = getComputedStyle(el).backgroundImage || '';
+            const m = bg.match(/url\\(["']?(.*?)["']?\\)/);
+            if (m && m[1] && m[1].startsWith('http')) out.push([m[1], 0, 0]);
+        });
+        return out;
+    """) or []
+
+    total = len(raw)
+    urls, seen = [], set()
+    for item in raw:
+        try:
+            src, w, h = item[0], int(item[1] or 0), int(item[2] or 0)
+            if not src or src in seen or src.startswith("data:"):
+                continue
+            low = src.lower()
+            if any(k in low for k in ("logo", "icon", "avatar", "profile",
+                                      "favicon", "sprite", "emoji", ".svg")):
+                continue
+            # 크기 정보가 있을 때만 소형 이미지 제외 (없으면 통과)
+            if (w and w < 150) or (h and h < 150):
+                continue
+            seen.add(src)
+            urls.append(src)
+            if len(urls) >= max_count:
+                break
+        except Exception:
+            continue
+
+    if log:
+        log(f"🖼️ (진단) 화면의 이미지 후보 {total}개 중 콘텐츠 이미지 {len(urls)}개 선별")
+        if total and not urls:
+            samples = [str(x[0])[:70] for x in raw[:5]]
+            log("🖼️ (진단) 걸러진 예시: " + " | ".join(samples))
+    return urls
+
+def _collect_note_images_old(driver, max_count: int) -> list[str]:
+    """(미사용) 이전 방식."""
     from selenium.webdriver.common.by import By
 
     urls, seen = [], set()
@@ -1605,11 +1673,9 @@ def _collect_note_images(driver, max_count: int) -> list[str]:
             if not src or src in seen or src.startswith("data:"):
                 continue
             low = src.lower()
-            # 로고·아이콘·아바타·프로필 등 잡이미지 제외
             if any(k in low for k in ("logo", "icon", "avatar", "profile",
                                       "favicon", "sprite", "emoji")):
                 continue
-            # 실제 콘텐츠 이미지는 어느 정도 크기가 있음
             try:
                 w = int(img.get_attribute("naturalWidth") or 0)
                 h = int(img.get_attribute("naturalHeight") or 0)
@@ -1697,11 +1763,14 @@ def fetch_note_content(browser: Browser, note_url: str, log,
     images = []
     if image_max > 0:
         try:
-            urls = _collect_note_images(driver, image_max)
+            urls = _collect_note_images(driver, image_max, log)
             if urls:
                 log(f"🖼️ 본문 이미지 {len(urls)}개 발견, 내려받는 중...")
                 images = download_images(urls, log)
                 log(f"🖼️ 이미지 {len(images)}개 준비 완료")
+            else:
+                log("🖼️ 가져올 본문 이미지를 찾지 못했습니다 "
+                    "(이미지가 캔버스로 그려지거나 접근이 막힌 경우)")
         except Exception as e:
             log(f"⚠️ 이미지 수집 실패: {e}")
 
