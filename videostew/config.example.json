@@ -1,0 +1,31 @@
+{
+  "apiKey": "여기에-비디오스튜-x-api-key",
+  "apiToken": "여기에-비디오스튜-x-token",
+  "baseProjectId": "88282f69vmqbqr9",
+  "webhookUrl": "",
+
+  "poll_interval_seconds": 15,
+  "render_timeout_seconds": 1800,
+  "check_interval_minutes": 10,
+
+  "wizard": {
+    "language": "ko",
+    "duration": "1m",
+    "style": "news",
+    "visual": "ai-image",
+    "visualStyle": "photo"
+  },
+
+  "google": {
+    "service_account_file": "service_account.json",
+    "spreadsheet_url": "https://docs.google.com/spreadsheets/d/여기에-시트-ID/edit",
+    "worksheet": 0
+  },
+
+  "youtube": {
+    "enabled": true,
+    "client_secret_file": "client_secret.json",
+    "token_file": "youtube_token.json",
+    "privacy_status": "unlisted"
+  }
+}
