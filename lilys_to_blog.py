@@ -1857,6 +1857,10 @@ def _clean_scraped_text(raw: str) -> str:
             continue
         if s in _UI_NOISE:
             continue
+        # 줄 전체가 메뉴 단어들로만 이뤄진 경우 제거 (예: "짧게 기본 길게 쉽게")
+        words = s.split()
+        if len(words) >= 2 and all(w in _UI_NOISE for w in words):
+            continue
         if any(s.startswith(p) for p in _UI_NOISE_PREFIX):
             continue
         # 아주 짧은 메뉴성 한 단어 줄(2자 이하)도 제거
