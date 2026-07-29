@@ -1831,6 +1831,95 @@ def _img_max(cfg: dict) -> int:
         return 0
     return _cfg_int(cfg, "image_max", 5)
 
+# 화면 스크래핑 시 섞여 들어오는 Lilys UI 문구 (이 줄들은 제거)
+_UI_NOISE = {
+    "요약", "확장", "짧게", "기본", "길게", "쉽게", "공유", "고급", "고급모델",
+    "고급 모델", "하이라이트", "구독", "즐겨찾기", "더보기", "확장 리포트 추가",
+    "만들기", "취소", "추가", "복사", "복사하기", "다운로드", "NOW", "홈",
+    "라이브러리", "미분류", "휴지통", "새로 추가하기",
+}
+_UI_NOISE_PREFIX = (
+    "블로그_글", "유튜브 숏츠", "스크립트", "카툰", "주요", "핵심", "캡처",
+    "관련 배경지식", "반대 시각", "내 액션아이템", "댓글분석",
+    "Gemini", "LILY", "조회수", "개월 전", "주 전", "일 전", "시간 전",
+    "나만의 템플릿", "더 깊이 이해하기",
+)
+
+def _clean_scraped_text(raw: str) -> str:
+    """화면에서 긁은 텍스트에서 Lilys UI 메뉴/버튼 문구 줄을 제거한다."""
+    if not raw:
+        return ""
+    out = []
+    for line in raw.splitlines():
+        s = line.strip()
+        if not s:
+            out.append("")
+            continue
+        if s in _UI_NOISE:
+            continue
+        if any(s.startswith(p) for p in _UI_NOISE_PREFIX):
+            continue
+        # 아주 짧은 메뉴성 한 단어 줄(2자 이하)도 제거
+        if len(s) <= 2 and not any(ch.isdigit() for ch in s):
+            continue
+        out.append(s)
+    text = "\n".join(out)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+def _copy_note_body(driver, log) -> str:
+    """
+    노트 하단의 '복사하기' 버튼을 눌러 클립보드로 깔끔한 본문만 가져온다.
+    성공하면 복사된 텍스트, 실패하면 빈 문자열.
+    """
+    import pyperclip
+    from selenium.webdriver.common.by import By
+
+    try:
+        pyperclip.copy("__LILYS_EMPTY__")  # 이전 내용 초기화(변화 감지용)
+    except Exception:
+        pass
+
+    # 복사 버튼 후보: aria-label/title 에 '복사', class 에 copy, 또는 복사 아이콘 버튼
+    candidates = []
+    xpaths = [
+        "//button[contains(@aria-label,'복사') or contains(@title,'복사')]",
+        "//*[@role='button'][contains(@aria-label,'복사') or contains(@title,'복사')]",
+        "//button[contains(@aria-label,'opy') or contains(@title,'opy')]",
+        "//button[normalize-space(text())='복사' or normalize-space(text())='복사하기']",
+    ]
+    for xp in xpaths:
+        try:
+            candidates += driver.find_elements(By.XPATH, xp)
+        except Exception:
+            continue
+    # 클래스/데이터 속성에 copy 가 든 버튼도 후보에 추가
+    try:
+        candidates += driver.find_elements(
+            By.CSS_SELECTOR, "button[class*='copy'], [data-action*='copy'], [class*='Copy']")
+    except Exception:
+        pass
+
+    for el in candidates:
+        try:
+            if not el.is_displayed():
+                continue
+            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
+            time.sleep(0.3)
+            driver.execute_script("arguments[0].click();", el)
+            time.sleep(1.2)
+            txt = ""
+            try:
+                txt = pyperclip.paste() or ""
+            except Exception:
+                txt = ""
+            if txt and txt != "__LILYS_EMPTY__" and len(txt.strip()) > 100:
+                log("📋 복사하기 버튼으로 본문을 가져왔습니다")
+                return txt.strip()
+        except Exception:
+            continue
+    return ""
+
 def fetch_note_content(browser: Browser, note_url: str, log,
                        report_name: str = "",
                        summary_length: str = "",
@@ -1859,15 +1948,23 @@ def fetch_note_content(browser: Browser, note_url: str, log,
     elif summary_length and summary_length != "기본":
         _click_summary_length(driver, summary_length, log)
 
-    body = ""
-    for css in ("article", "main", "body"):
-        try:
-            el = driver.find_element(By.CSS_SELECTOR, css)
-            body = el.text.strip()
-            if len(body) > 200:
-                break
-        except Exception:
-            continue
+    # 1) '복사하기' 버튼으로 깔끔한 본문 확보 (UI 잡문구 없이)
+    body = _copy_note_body(driver, log)
+
+    # 2) 복사가 안 되면 화면 텍스트를 긁되, UI 잡문구를 걸러낸다
+    if not body or len(body) < 100:
+        raw = ""
+        for css in ("article", "main", "body"):
+            try:
+                el = driver.find_element(By.CSS_SELECTOR, css)
+                raw = el.text.strip()
+                if len(raw) > 200:
+                    break
+            except Exception:
+                continue
+        body = _clean_scraped_text(raw)
+        if raw:
+            log("📄 복사 버튼을 못 찾아 화면 텍스트에서 UI 문구를 걸러 가져왔습니다")
 
     images = []
     if image_max > 0:
