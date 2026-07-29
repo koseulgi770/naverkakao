@@ -1562,6 +1562,31 @@ def fetch_collection_notes(browser: Browser, log,
 # 확장 리포트 즐겨찾기 프리셋 (드롭다운에서 선택)
 REPORT_PRESETS = ["", "블로그_글+제목 (트렌드)", "유튜브 숏츠", "스크립트", "카툰"]
 
+def _dump_report_debug(driver, log):
+    """확장 리포트를 못 찾았을 때 노트 화면의 버튼/탭 텍스트를 파일로 남긴다."""
+    from selenium.webdriver.common.by import By
+    try:
+        texts = []
+        for el in driver.find_elements(By.CSS_SELECTOR, "button, a, [role='tab'], span, div"):
+            try:
+                t = (el.text or "").strip()
+                if t and 1 <= len(t) <= 25 and el.is_displayed():
+                    texts.append(t)
+            except Exception:
+                continue
+        seen, uniq = set(), []
+        for t in texts:
+            if t not in seen:
+                seen.add(t)
+                uniq.append(t)
+        path = os.path.join(BASE_DIR, "report_debug.txt")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(f"URL: {driver.current_url}\n\n[노트 화면의 짧은 텍스트들]\n")
+            f.write("\n".join(uniq[:120]))
+        log(f"🛠 확장 진단 파일 저장: {path} (이 내용을 보여주시면 버튼을 맞춰드립니다)")
+    except Exception:
+        pass
+
 def _click_report_tab(driver, report_name: str, log) -> bool:
     """
     노트 페이지에서 확장 리포트를 선택해 연다.
@@ -1604,19 +1629,23 @@ def _click_report_tab(driver, report_name: str, log) -> bool:
 
     # 2) '확장' 버튼 클릭 → 팝업 열기
     opened = False
-    for label in ("확장",):
+    for label in ("확장", "Expand", "리포트"):
         for el in driver.find_elements(
                 By.XPATH, f"//*[normalize-space(text())='{label}']"):
             try:
                 if el.is_displayed():
-                    el.click()
+                    driver.execute_script("arguments[0].click();", el)
                     time.sleep(2)
                     opened = True
+                    log(f"📑 '{label}' 버튼을 눌러 확장 리포트 목록을 열었습니다")
                     break
             except Exception:
                 continue
         if opened:
             break
+    if not opened:
+        log("⚠️ 노트 화면에서 '확장' 버튼을 찾지 못했습니다")
+        _dump_report_debug(driver, log)
 
     if opened:
         # 팝업(확장 리포트 추가)에서 즐겨찾기 카드 선택
@@ -1641,6 +1670,9 @@ def _click_report_tab(driver, report_name: str, log) -> bool:
                 return True
             except Exception as e:
                 log(f"⚠️ 리포트 선택 중 오류: {e}")
+        else:
+            log(f"⚠️ 팝업에서 '{key}' 카드를 찾지 못했습니다")
+            _dump_report_debug(driver, log)
         # 못 찾았으면 팝업 닫기
         for el in driver.find_elements(
                 By.XPATH, "//*[normalize-space(text())='취소']"):
@@ -1822,6 +1854,7 @@ def fetch_note_content(browser: Browser, note_url: str, log,
         pass
 
     if report_name:
+        log(f"📑 확장 리포트 '{report_name}' 적용을 시도합니다...")
         _click_report_tab(driver, report_name, log)
     elif summary_length and summary_length != "기본":
         _click_summary_length(driver, summary_length, log)
