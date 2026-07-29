@@ -2621,6 +2621,23 @@ class App(tk.Tk):
                   padx=10, pady=3, cursor="hand2",
                   command=lambda: self._refresh_library(cfg, win)).pack(side="right")
 
+        # 리포트 선택 줄: 발행 직전에 어떤 확장 리포트로 가져올지 미리 고른다
+        rep_row = tk.Frame(win, bg=BG)
+        rep_row.pack(fill="x", padx=16, pady=(0, 6))
+        tk.Label(rep_row, text="가져올 내용:", bg=BG, fg=FG_DIM,
+                 font=FONT_M).pack(side="left", padx=(0, 6))
+        report_var = tk.StringVar(value=cfg.get("lilys_report_name", "") or "")
+        ttk.Combobox(rep_row, textvariable=report_var, state="normal",
+                     values=REPORT_PRESETS, font=FONT_M, width=24).pack(side="left")
+        tk.Label(rep_row, text="(비우면 기본 요약)", bg=BG, fg="#64748b",
+                 font=("맑은 고딕", 9)).pack(side="left", padx=(6, 0))
+
+        length_var = tk.StringVar(value=cfg.get("lilys_summary_length", "기본"))
+        tk.Label(rep_row, text="   요약 길이:", bg=BG, fg=FG_DIM,
+                 font=FONT_M).pack(side="left", padx=(12, 6))
+        ttk.Combobox(rep_row, textvariable=length_var, state="readonly",
+                     values=SUMMARY_LENGTHS, font=FONT_M, width=8).pack(side="left")
+
         # 표 스타일 (다크)
         style = ttk.Style(win)
         style.theme_use("clam")
@@ -2697,12 +2714,24 @@ class App(tk.Tk):
 
         preview_cache: dict = {}  # url -> (제목, 본문)
 
+        def _apply_choice():
+            """창에서 고른 리포트/요약 길이를 cfg와 저장 설정에 반영한다."""
+            cfg["lilys_report_name"] = report_var.get().strip()
+            cfg["lilys_summary_length"] = length_var.get().strip() or "기본"
+            # 메인 설정 화면에도 반영 + 파일 저장
+            if "lilys_report_name" in self._cfg_vars:
+                self._cfg_vars["lilys_report_name"].set(cfg["lilys_report_name"])
+            if "lilys_summary_length" in self._cfg_vars:
+                self._cfg_vars["lilys_summary_length"].set(cfg["lilys_summary_length"])
+            try:
+                save_config(cfg)
+            except Exception:
+                pass
+
         def _show_preview(iid):
             url, title = url_by_iid[iid]
-            if url in preview_cache:
-                t, b = preview_cache[url]
-                _set_preview(t, b)
-                return
+            _apply_choice()
+            preview_cache.pop(url, None)  # 리포트가 바뀌었을 수 있으니 새로 불러옴
             _set_preview(title, "⏳ 미리보기를 불러오는 중입니다...")
 
             def _on_ready(t, body):
@@ -2774,6 +2803,9 @@ class App(tk.Tk):
             if not selected:
                 messagebox.showwarning("선택 필요", "발행할 노트를 체크해 주세요.", parent=win)
                 return
+            _apply_choice()
+            rep = cfg.get("lilys_report_name") or "기본 요약"
+            self._append_log(f"📑 이번 발행은 '{rep}' 내용으로 가져옵니다")
             btn_start.config(state="disabled", text="포스팅 중...")
             self._worker.post_selected_notes(cfg, selected, on_status=_on_status)
 
