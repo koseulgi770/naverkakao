@@ -1386,6 +1386,18 @@ def _click_collect_notes(driver, log, max_notes: int = 30) -> list[tuple[str, st
     from selenium.webdriver.common.keys import Keys
 
     base_url = driver.current_url
+    # 지연 로딩/무한스크롤 라이브러리 대비: 카드 수가 안 늘 때까지 스크롤
+    _scroll_page(driver)
+    prev = -1
+    for _ in range(8):
+        cards_now = [t for t in _mark_cards(driver) if _looks_like_note_card(t)]
+        if len(cards_now) <= prev:
+            break
+        prev = len(cards_now)
+        _scroll_page(driver)
+        if len(cards_now) >= max_notes:
+            break
+
     card_texts = _mark_cards(driver)
     targets = [t for t in card_texts if _looks_like_note_card(t)][:max_notes]
     if not targets:
@@ -1942,7 +1954,7 @@ class Worker:
                 browser = self._get_browser(cfg)
                 notes = fetch_collection_notes(
                     browser, self.log, cfg.get("lilys_folder_name", ""),
-                    max_notes=_cfg_int(cfg, "max_fetch_count", 10))
+                    max_notes=_fetch_count(cfg))
                 if notes:
                     save_notes_cache(notes)
                     self.log(f"🔍 라이브러리에서 노트 {len(notes)}개를 찾아 저장했습니다")
@@ -2093,7 +2105,7 @@ class Worker:
                     browser = self._get_browser(cfg)
                     notes = fetch_collection_notes(
                         browser, self.log, cfg.get("lilys_folder_name", ""),
-                        max_notes=_cfg_int(cfg, "max_fetch_count", 10))
+                        max_notes=_fetch_count(cfg))
                     self.log(f"🔍 라이브러리 노트 {len(notes)}개 확인")
 
                     if first_scan and notes:
@@ -2216,7 +2228,15 @@ def _combo_values_for(key):
         "lilys_summary_length": SUMMARY_LENGTHS,
         "image_enabled": list(IMAGE_ENABLED_LABELS.values()),
         "image_max": ["3", "5", "8", "10"],
+        "max_fetch_count": ["전체", "3", "5", "10", "20", "30", "50"],
     }.get(key)
+
+def _fetch_count(cfg) -> int:
+    """가져올 노트 개수. '전체'면 사실상 제한 없음(9999)."""
+    v = str(cfg.get("max_fetch_count", 10)).strip()
+    if v in ("전체", "all", ""):
+        return 9999
+    return _cfg_int(cfg, "max_fetch_count", 10)
 SURFACE  = "#2a2a3d"
 ACCENT   = "#7c3aed"
 ACCENT_H = "#6d28d9"
