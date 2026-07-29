@@ -1547,61 +1547,99 @@ def fetch_collection_notes(browser: Browser, log,
         _dump_debug(driver, log)
     return notes
 
+# 확장 리포트 즐겨찾기 프리셋 (드롭다운에서 선택)
+REPORT_PRESETS = ["", "블로그_글+제목 (트렌드)", "유튜브 숏츠", "스크립트", "카툰"]
+
 def _click_report_tab(driver, report_name: str, log) -> bool:
     """
-    노트 페이지에서 지정한 이름의 탭/확장 리포트를 클릭한다.
-    (예: '블로그_글+제목', '스크립트' 등 미리 생성해 둔 확장 리포트)
+    노트 페이지에서 확장 리포트를 선택해 연다.
+    1) 이미 열려 있는 탭이면 바로 클릭
+    2) 없으면 '확장' 버튼 → '확장 리포트 추가' 팝업에서 즐겨찾기 카드 선택 → '추가'
+    report_name 예: '블로그_글+제목 (트렌드)', '유튜브 숏츠', '스크립트', '카툰'
     """
     from selenium.webdriver.common.by import By
 
-    def _try_click(name: str) -> bool:
+    # 이름 매칭용 키워드 (괄호/공백 앞부분만 써도 매칭)
+    key = re.split(r"[\s(]", report_name.strip())[0] if report_name else ""
+
+    def _find_clickable(keyword: str):
+        """텍스트에 keyword를 포함하는, 클릭 가능한 가장 안쪽 요소를 찾는다."""
+        found = []
         for el in driver.find_elements(
-                By.XPATH, f"//*[contains(normalize-space(text()), '{name}')]"):
+                By.XPATH, f"//*[contains(normalize-space(.), '{keyword}')]"):
             try:
                 if el.is_displayed():
-                    # '추가' 버튼이 있는 생성 팝업 안이면 건너뜀 (새 리포트 생성 방지)
-                    driver.execute_script(
-                        "arguments[0].scrollIntoView({block:'center'});", el)
-                    time.sleep(0.3)
-                    el.click()
-                    time.sleep(4)
-                    return True
+                    found.append(el)
             except Exception:
                 continue
-        return False
+        # 가장 안쪽(자식이 keyword를 안 가진) 요소 우선
+        for el in reversed(found):
+            return el
+        return None
 
-    # 1) 화면에 이미 해당 탭이 보이면 바로 클릭
-    if _try_click(report_name):
-        log(f"📑 '{report_name}' 탭을 열었습니다")
-        return True
-
-    # 2) '확장' 메뉴를 눌러 목록을 펼친 뒤 다시 시도
-    for menu in ("확장", "리포트"):
+    # 1) 이미 열린 탭이면 바로 클릭
+    tab = _find_clickable(key) if key else None
+    if tab:
         try:
-            for el in driver.find_elements(
-                    By.XPATH, f"//*[normalize-space(text())='{menu}']"):
-                if el.is_displayed():
-                    el.click()
-                    time.sleep(2)
-                    break
-        except Exception:
-            continue
-        if _try_click(report_name):
-            log(f"📑 '{menu}' 메뉴에서 '{report_name}' 리포트를 열었습니다")
+            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", tab)
+            time.sleep(0.3)
+            tab.click()
+            time.sleep(4)
+            log(f"📑 '{report_name}' 리포트를 열었습니다")
             return True
-        # 실수로 생성 팝업이 열렸으면 취소 클릭
-        try:
-            for el in driver.find_elements(
-                    By.XPATH, "//*[normalize-space(text())='취소']"):
-                if el.is_displayed():
-                    el.click()
-                    time.sleep(1)
-                    break
         except Exception:
             pass
 
-    log(f"⚠️ '{report_name}' 탭/리포트를 찾지 못해 기본 요약을 가져옵니다. "
-        "(Lilys에서 해당 확장 리포트를 먼저 생성해 두어야 합니다)")
+    # 2) '확장' 버튼 클릭 → 팝업 열기
+    opened = False
+    for label in ("확장",):
+        for el in driver.find_elements(
+                By.XPATH, f"//*[normalize-space(text())='{label}']"):
+            try:
+                if el.is_displayed():
+                    el.click()
+                    time.sleep(2)
+                    opened = True
+                    break
+            except Exception:
+                continue
+        if opened:
+            break
+
+    if opened:
+        # 팝업(확장 리포트 추가)에서 즐겨찾기 카드 선택
+        card = _find_clickable(key) if key else None
+        if card:
+            try:
+                driver.execute_script("arguments[0].scrollIntoView({block:'center'});", card)
+                time.sleep(0.3)
+                card.click()
+                time.sleep(1)
+                # '추가' 버튼이 있으면 눌러 생성/열기 진행
+                for btn in driver.find_elements(
+                        By.XPATH, "//button[normalize-space(text())='추가']"):
+                    try:
+                        if btn.is_displayed() and btn.is_enabled():
+                            btn.click()
+                            break
+                    except Exception:
+                        continue
+                log(f"📑 확장에서 '{report_name}' 리포트를 선택했습니다 (생성 대기)")
+                time.sleep(8)  # 리포트 생성/로딩 대기
+                return True
+            except Exception as e:
+                log(f"⚠️ 리포트 선택 중 오류: {e}")
+        # 못 찾았으면 팝업 닫기
+        for el in driver.find_elements(
+                By.XPATH, "//*[normalize-space(text())='취소']"):
+            try:
+                if el.is_displayed():
+                    el.click()
+                    break
+            except Exception:
+                continue
+
+    log(f"⚠️ '{report_name}' 리포트를 찾지 못해 기본 요약을 가져옵니다.")
     return False
 
 def _click_summary_length(driver, length: str, log):
@@ -2128,7 +2166,7 @@ STEP_FIELDS = {
     "source": [
         ("lilys_folder_name",      "라이브러리 폴더 이름 (비우면 전체)", False),
         ("max_fetch_count",        "가져올 노트 개수 (최대)", False),
-        ("lilys_report_name",      "가져올 확장 리포트 이름 (비우면 요약)", False),
+        ("lilys_report_name",      "확장 리포트 선택 (비우면 요약)", False),
         ("lilys_api_key",          "Lilys API Key (선택, 유튜브 직접 요약용)", True),
         ("model_type",             "요약 모델 (gpt-3.5 / gpt-4)", False),
         ("result_language",        "요약 언어 (ko / en)",   False),
@@ -2291,7 +2329,12 @@ class App(tk.Tk):
             var = tk.StringVar()
             self._cfg_vars[key] = var
             values = _combo_values_for(key)
-            if values:
+            if key == "lilys_report_name":
+                # 확장 리포트: 즐겨찾기 프리셋에서 고르되 직접 입력도 가능
+                ttk.Combobox(parent, textvariable=var, state="normal",
+                             values=REPORT_PRESETS, font=FONT_M, width=38).grid(
+                    row=row, column=1, padx=(4, 12), pady=4)
+            elif values:
                 ttk.Combobox(parent, textvariable=var, state="readonly",
                              values=values, font=FONT_M, width=38).grid(
                     row=row, column=1, padx=(4, 12), pady=4)
