@@ -480,6 +480,18 @@ def _kill_profile_chrome(profile_dir: str):
     except Exception:
         pass
 
+def safe_get(driver, url) -> bool:
+    """페이지 이동. 로드가 시간제한을 넘겨 멈추면 로딩을 중단하고 현재 DOM으로 계속 진행."""
+    try:
+        driver.get(url)
+        return True
+    except Exception:
+        try:
+            driver.execute_script("window.stop();")
+        except Exception:
+            pass
+        return False
+
 class Browser:
     def __init__(self, profile_dir: str, log):
         self.profile_dir = profile_dir
@@ -498,7 +510,15 @@ class Browser:
         opts.add_argument("--no-default-browser-check")
         opts.add_argument("--disable-blink-features=AutomationControlled")
         opts.add_experimental_option("excludeSwitches", ["enable-automation"])
-        return webdriver.Chrome(options=opts)
+        opts.page_load_strategy = "eager"  # DOM 준비되면 진행 (모든 리소스 대기 안 함)
+        driver = webdriver.Chrome(options=opts)
+        # 페이지 로드/스크립트가 무한정 멈추지 않도록 시간제한
+        try:
+            driver.set_page_load_timeout(60)
+            driver.set_script_timeout(30)
+        except Exception:
+            pass
+        return driver
 
     def get_driver(self):
         with self._launch_lock:  # 동시에 두 개가 뜨지 않도록
@@ -841,7 +861,7 @@ def ensure_naver_login(driver, cfg, log) -> bool:
 
     # 이미 로그인 상태인지 쿠키로 확인
     try:
-        driver.get("https://www.naver.com")
+        safe_get(driver, "https://www.naver.com")
         time.sleep(2)
         if any(c["name"] in ("NID_AUT", "NID_SES") for c in driver.get_cookies()):
             log("✅ 네이버 로그인 상태 확인됨")
@@ -849,7 +869,7 @@ def ensure_naver_login(driver, cfg, log) -> bool:
     except Exception:
         pass
 
-    driver.get("https://nid.naver.com/nidlogin.login")
+    safe_get(driver, "https://nid.naver.com/nidlogin.login")
     time.sleep(2)
 
     nid = (cfg.get("naver_id") or "").strip()
@@ -1029,7 +1049,7 @@ def post_to_naver_blog(browser: Browser, cfg: dict, title: str, content: str,
         if url in tried:
             continue
         tried.add(url)
-        driver.get(url)
+        safe_get(driver, url)
         time.sleep(5)
         _focus_naver_tab()
 
@@ -1397,10 +1417,16 @@ def _click_collect_notes(driver, log, max_notes: int = 30) -> list[tuple[str, st
         while time.time() < deadline:
             if driver.current_url != base_url:
                 new_url = driver.current_url
-                driver.back()
+                try:
+                    driver.back()
+                except Exception:
+                    try:
+                        driver.execute_script("window.stop();")
+                    except Exception:
+                        pass
                 time.sleep(3)
                 if driver.current_url != base_url:
-                    driver.get(base_url)
+                    safe_get(driver, base_url)
                     time.sleep(4)
                 return new_url
             time.sleep(0.5)
@@ -1432,7 +1458,7 @@ def _click_collect_notes(driver, log, max_notes: int = 30) -> list[tuple[str, st
             break
         if attempt == 1:
             log(f"⚠️ 카드 {len(pending)}개가 열리지 않아 한 번 더 시도합니다...")
-            driver.get(base_url)
+            safe_get(driver, base_url)
             time.sleep(4)
 
     if pending:
@@ -1470,7 +1496,7 @@ def fetch_collection_notes(browser: Browser, log,
     notes = []
     # 라이브러리 → 보관함 순으로 시도 (Lilys 화면 구성에 따라 다름)
     for url in ("https://lilys.ai/library", "https://lilys.ai/collections", "https://lilys.ai/"):
-        driver.get(url)
+        safe_get(driver, url)
         time.sleep(6)
 
         cur = driver.current_url
@@ -1736,7 +1762,7 @@ def fetch_note_content(browser: Browser, note_url: str, log,
     from selenium.webdriver.common.by import By
 
     driver = browser.get_driver()
-    driver.get(note_url)
+    safe_get(driver, note_url)
     time.sleep(6)
 
     title = ""
@@ -1803,7 +1829,7 @@ class Worker:
             try:
                 browser = self._get_browser(cfg)
                 driver = browser.get_driver()
-                driver.get("https://nid.naver.com/nidlogin.login")
+                safe_get(driver, "https://nid.naver.com/nidlogin.login")
                 driver.execute_script("window.open('https://lilys.ai', '_blank');")
                 self.log("🔑 브라우저가 열렸습니다. 네이버와 Lilys AI에 로그인해 주세요.")
                 self.log("   로그인 후 창을 닫지 말고 그대로 두면 세션이 프로필에 저장됩니다.")
