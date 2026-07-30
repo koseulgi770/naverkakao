@@ -2174,11 +2174,9 @@ def fetch_note_content(browser: Browser, note_url: str, log,
     if report_name:
         log(f"📑 확장 리포트 '{report_name}' 적용을 시도합니다...")
         ok = _click_report_tab(driver, report_name, log)
-        # 리포트가 실제로 열렸는지 확인용 진단은 항상 남겨 둠
-        _dump_report_debug(driver, log)
         if not ok:
-            log("⚠️ 리포트를 확실히 열지 못했을 수 있습니다. "
-                "report_debug.txt 의 버튼/탭 목록을 보내주시면 정확히 맞추겠습니다.")
+            log("⚠️ 리포트를 확실히 열지 못했을 수 있습니다.")
+            _dump_report_debug(driver, log)  # 실패했을 때만 진단 파일 남김
     elif summary_length and summary_length != "기본":
         _click_summary_length(driver, summary_length, log)
 
