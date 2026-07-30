@@ -47,9 +47,11 @@ DEFAULT_CONFIG = {
     "gemini_key": "",
     "gemini_model": "gemini-2.5-flash",
     "ai_prompt": "",
-    "paragraph_style": "airy",
+    "paragraph_style": "para",
     "line_max_chars": 30,
     "use_quotes": "on",
+    "quote_style": "line",
+    "use_divider": "on",
     "text_align": "left",
     "image_enabled": "on",
     "image_max": 5,
@@ -91,6 +93,23 @@ USE_QUOTES_LABELS = {
 }
 USE_QUOTES_CODES = {v: k for k, v in USE_QUOTES_LABELS.items()}
 
+# 인용구(소제목) 스타일 — SE 에디터 인용구 팝업의 몇 번째 스타일을 쓸지
+QUOTE_STYLE_LABELS = {
+    "line": "▎ 세로줄형",
+    "bubble": "💬 말풍선형",
+    "corner": "『』 따옴표형",
+}
+QUOTE_STYLE_CODES = {v: k for k, v in QUOTE_STYLE_LABELS.items()}
+# 스타일 → 인용구 팝업에서 클릭할 버튼 인덱스(0부터)
+QUOTE_STYLE_INDEX = {"line": 0, "bubble": 2, "corner": 1}
+
+# 구분선 사용 여부
+DIVIDER_LABELS = {
+    "on": "➖ 구분선 넣기 (제목·소제목 구분)",
+    "off": "🚫 구분선 안 씀",
+}
+DIVIDER_CODES = {v: k for k, v in DIVIDER_LABELS.items()}
+
 # 본문 정렬
 TEXT_ALIGN_LABELS = {
     "left": "⬅️ 왼쪽 정렬",
@@ -100,10 +119,34 @@ TEXT_ALIGN_CODES = {v: k for k, v in TEXT_ALIGN_LABELS.items()}
 
 # 문단 나누기
 PARAGRAPH_LABELS = {
+    "para": "📑 문단 단위 (문장 유지 + 문단 사이 여백)",
     "airy": "✍️ 짧은 줄 + 여백 (모바일 가독성)",
     "none": "📄 그대로",
 }
 PARAGRAPH_CODES = {v: k for k, v in PARAGRAPH_LABELS.items()}
+
+def para_format(text: str) -> str:
+    """문단 단위 정리: 소제목(인용구) 줄은 그대로 두고,
+    일반 문장들은 빈 줄 기준으로 한 문단씩 합쳐 문단 사이에 여백을 준다."""
+    blocks, buf = [], []
+
+    def _flush():
+        if buf:
+            blocks.append(" ".join(buf))
+            buf.clear()
+
+    for raw in text.splitlines():
+        s = raw.strip()
+        if not s:
+            _flush()
+            continue
+        if looks_like_quote(s):     # 소제목/인용구는 독립 블록
+            _flush()
+            blocks.append(s)
+        else:
+            buf.append(s)
+    _flush()
+    return "\n\n".join(b for b in blocks if b)
 
 def _split_long_line(text: str, max_len: int = 40) -> list[str]:
     """긴 줄을 문장 → 어절 단위로 잘라 짧은 줄 목록으로 만든다."""
@@ -151,8 +194,11 @@ def prepare_body(cfg: dict, body: str) -> str:
     if cfg.get("transform_mode") == "raw":
         return body.strip()
     text = markdown_to_plain(body)
-    if cfg.get("paragraph_style", "airy") == "airy":
+    style = cfg.get("paragraph_style", "para")
+    if style == "airy":
         text = airy_format(text, max_len=_cfg_int(cfg, "line_max_chars", 30))
+    elif style == "para":
+        text = para_format(text)
     return text
 
 def load_config() -> dict:
@@ -633,9 +679,29 @@ def _click_toolbar_button(driver, selectors) -> bool:
             continue
     return False
 
-def insert_quote_block(driver, text: str) -> bool:
-    """SmartEditor 인용구 블록에 한 줄을 넣고 블록을 빠져나온다."""
+def insert_naver_divider(driver) -> bool:
+    """본문에 구분선(수평선)을 삽입한다."""
+    ok = _click_toolbar_button(driver, [
+        "button.se-horizontalLine-toolbar-button",
+        'button[data-name="horizontalLine"]',
+        'button[aria-label*="구분선"]',
+        "button.se-toolbar-button-horizontalLine",
+    ])
+    if ok:
+        time.sleep(0.3)
+        # 구분선 스타일 팝업이 뜨면 첫 번째 선택
+        _click_toolbar_button(driver, [
+            "ul.se-toolbar-option-horizontalLine li:first-child button",
+            'button[class*="horizontalLine"][class*="line"]',
+        ])
+        time.sleep(0.3)
+    return ok
+
+def insert_quote_block(driver, text: str, style: str = "line") -> bool:
+    """SmartEditor 인용구 블록에 한 줄을 넣고 블록을 빠져나온다.
+    style: line(세로줄) / bubble(말풍선) / corner(따옴표)"""
     import pyperclip
+    from selenium.webdriver.common.by import By
 
     cleaned = _strip_quote_markers(text)
     if not cleaned:
@@ -648,11 +714,27 @@ def insert_quote_block(driver, text: str) -> bool:
     ])
     if opened:
         time.sleep(0.35)
-        _click_toolbar_button(driver, [
-            "button.se-quotation-line-button",
-            'button[class*="quotation"][class*="line"]',
-            "ul.se-toolbar-option-quotation li:first-child button",
-        ])
+        # 인용구 스타일 팝업에서 원하는 스타일 버튼을 인덱스로 선택
+        idx = QUOTE_STYLE_INDEX.get(style, 0)
+        picked = False
+        try:
+            btns = driver.find_elements(
+                By.CSS_SELECTOR,
+                "ul.se-toolbar-option-quotation li button, "
+                'button[class*="quotation"][class*="button"]')
+            vis = [b for b in btns if b.is_displayed()]
+            if vis:
+                target = vis[idx] if idx < len(vis) else vis[0]
+                driver.execute_script("arguments[0].click();", target)
+                picked = True
+        except Exception:
+            pass
+        if not picked:
+            _click_toolbar_button(driver, [
+                "button.se-quotation-line-button",
+                'button[class*="quotation"][class*="line"]',
+                "ul.se-toolbar-option-quotation li:first-child button",
+            ])
         time.sleep(0.35)
 
     pyperclip.copy(cleaned)
@@ -1181,7 +1263,18 @@ def post_to_naver_blog(browser: Browser, cfg: dict, title: str, content: str,
     import pyperclip
     use_quotes = (cfg.get("transform_mode") != "raw"
                   and cfg.get("use_quotes", "on") != "off")
+    quote_style = cfg.get("quote_style", "line")
+    use_divider = (cfg.get("transform_mode") != "raw"
+                   and cfg.get("use_divider", "on") != "off")
     wrote_any = False
+
+    # 본문 맨 앞(제목 아래) 구분선
+    if use_divider:
+        try:
+            insert_naver_divider(driver)
+            _focus_body()
+        except Exception:
+            pass
 
     for raw_line in content.split("\n"):
         line = raw_line.rstrip()
@@ -1194,7 +1287,10 @@ def post_to_naver_blog(browser: Browser, cfg: dict, title: str, content: str,
             # 인용구는 너무 길면 소제목이 아니므로 일반 문단으로 처리
             if len(subtitle) <= 40:
                 try:
-                    insert_quote_block(driver, subtitle)
+                    if use_divider:
+                        insert_naver_divider(driver)   # 소제목 앞 구분선
+                        _focus_body()
+                    insert_quote_block(driver, subtitle, style=quote_style)
                     _focus_body()          # ★ 인용구 뒤 본문 영역 재클릭
                     wrote_any = True
                     continue
@@ -2394,6 +2490,8 @@ STEP_FIELDS = {
         ("paragraph_style",        "문단 나누기",           False),
         ("line_max_chars",         "한 줄 글자 수 (줄바꿈 기준)", False),
         ("use_quotes",             "인용구",                False),
+        ("quote_style",            "인용구 스타일",         False),
+        ("use_divider",            "구분선",                False),
         ("text_align",             "본문 정렬",             False),
     ],
     "login": [
@@ -2420,6 +2518,8 @@ def _combo_values_for(key):
         "paragraph_style": list(PARAGRAPH_LABELS.values()),
         "line_max_chars": ["20", "25", "30", "35", "40", "50"],
         "use_quotes": list(USE_QUOTES_LABELS.values()),
+        "quote_style": list(QUOTE_STYLE_LABELS.values()),
+        "use_divider": list(DIVIDER_LABELS.values()),
         "text_align": list(TEXT_ALIGN_LABELS.values()),
         "lilys_summary_length": SUMMARY_LENGTHS,
         "image_enabled": list(IMAGE_ENABLED_LABELS.values()),
@@ -2510,7 +2610,7 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Lilys AI → 네이버 블로그 자동 포스팅")
-        self.geometry("760x800")
+        self.geometry("760x860")
         self.resizable(False, False)
         self.configure(bg=BG)
 
@@ -2533,7 +2633,7 @@ class App(tk.Tk):
         self._yt_var = tk.StringVar()
 
         # 단계별 설정 페이지를 한 자리(카드)에 겹쳐두고 하나만 보여준다
-        card = tk.Frame(self, bg=SURFACE, height=380)
+        card = tk.Frame(self, bg=SURFACE, height=440)
         card.pack(fill="x", padx=24, pady=4)
         card.pack_propagate(False)
         self._pages = {}
@@ -2764,6 +2864,12 @@ class App(tk.Tk):
             elif k == "use_quotes":
                 var.set(USE_QUOTES_LABELS.get(cfg.get(k, "on"),
                                               USE_QUOTES_LABELS["on"]))
+            elif k == "quote_style":
+                var.set(QUOTE_STYLE_LABELS.get(cfg.get(k, "line"),
+                                               QUOTE_STYLE_LABELS["line"]))
+            elif k == "use_divider":
+                var.set(DIVIDER_LABELS.get(cfg.get(k, "on"),
+                                           DIVIDER_LABELS["on"]))
             elif k == "image_enabled":
                 var.set(IMAGE_ENABLED_LABELS.get(cfg.get(k, "on"),
                                                  IMAGE_ENABLED_LABELS["on"]))
@@ -2789,6 +2895,10 @@ class App(tk.Tk):
                 cfg[k] = TEXT_ALIGN_CODES.get(val, "left")
             elif k == "use_quotes":
                 cfg[k] = USE_QUOTES_CODES.get(val, "on")
+            elif k == "quote_style":
+                cfg[k] = QUOTE_STYLE_CODES.get(val, "line")
+            elif k == "use_divider":
+                cfg[k] = DIVIDER_CODES.get(val, "on")
             elif k == "image_enabled":
                 cfg[k] = IMAGE_ENABLED_CODES.get(val, "on")
             elif k in ("check_interval_minutes", "max_fetch_count",
