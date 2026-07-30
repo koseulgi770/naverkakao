@@ -565,7 +565,11 @@ class Browser:
         opts.add_argument("--no-first-run")
         opts.add_argument("--no-default-browser-check")
         opts.add_argument("--disable-blink-features=AutomationControlled")
+        opts.add_argument("--disable-session-crashed-bubble")
+        opts.add_argument("--disable-infobars")
+        opts.add_argument("--no-sandbox")
         opts.add_experimental_option("excludeSwitches", ["enable-automation"])
+        opts.add_experimental_option("detach", True)  # 파이썬이 끝나도 창 유지
         opts.page_load_strategy = "eager"  # DOM 준비되면 진행 (모든 리소스 대기 안 함)
         driver = webdriver.Chrome(options=opts)
         # 페이지 로드/스크립트가 무한정 멈추지 않도록 시간제한
@@ -580,33 +584,56 @@ class Browser:
         with self._launch_lock:  # 동시에 두 개가 뜨지 않도록
             return self._get_driver_locked()
 
-    def _get_driver_locked(self):
-        if self.driver:
-            try:
-                _ = self.driver.current_url  # 살아있는지 확인
-                return self.driver
-            except Exception:
-                self.driver = None
-
+    def _alive(self, drv) -> bool:
         try:
-            self.driver = self._launch()
+            _ = drv.current_url
+            return True
         except Exception:
-            # 같은 프로필을 쓰는 크롬이 이미 떠 있으면 실행에 실패한다.
-            # 남아있는 크롬을 정리하고 한 번 더 시도한다.
-            self.log("⚠️ 크롬 실행 실패. 프로필을 사용 중인 기존 크롬 창을 정리하고 재시도합니다...")
-            _kill_profile_chrome(self.profile_dir)
-            time.sleep(3)
+            return False
+
+    def _launch_valid(self):
+        """크롬을 띄우고 세션이 실제로 살아있는지 확인해서 반환한다."""
+        drv = self._launch()
+        time.sleep(1)
+        if not self._alive(drv):
             try:
-                self.driver = self._launch()
+                drv.quit()
+            except Exception:
+                pass
+            raise RuntimeError("세션이 즉시 종료됨")
+        return drv
+
+    def _get_driver_locked(self):
+        # 기존 드라이버가 살아있으면 재사용 (로그인 브라우저 등)
+        if self.driver and self._alive(self.driver):
+            return self.driver
+        self.driver = None
+
+        # 1차 시도
+        try:
+            self.driver = self._launch_valid()
+            return self.driver
+        except Exception:
+            pass
+
+        # 프로필을 잡고 있는 좀비 크롬 정리 후 재시도 (최대 2회)
+        self.log("⚠️ 크롬 실행 실패. 프로필을 사용 중인 기존 크롬 창을 정리하고 재시도합니다...")
+        for attempt in range(2):
+            _kill_profile_chrome(self.profile_dir)
+            time.sleep(5)  # 크롬이 프로필 잠금을 풀 때까지 대기
+            try:
+                self.driver = self._launch_valid()
+                return self.driver
             except Exception as e:
-                raise RuntimeError(
-                    "크롬을 시작하지 못했습니다. 다음을 확인해 주세요:\n"
-                    "  1) 열려 있는 크롬 창을 모두 닫고 다시 시도\n"
-                    "  2) 크롬(Chrome)이 설치되어 있는지 확인\n"
-                    "  3) 크롬을 최신 버전으로 업데이트\n"
-                    f"  (원본 오류: {str(e).splitlines()[0]})"
-                ) from e
-        return self.driver
+                last = e
+                continue
+
+        raise RuntimeError(
+            "크롬을 시작하지 못했습니다. 다음을 확인해 주세요:\n"
+            "  1) 작업 표시줄/작업관리자에서 열려 있는 크롬을 모두 닫고 다시 시도\n"
+            "  2) 크롬(Chrome)이 설치·최신 버전인지 확인\n"
+            f"  (원본 오류: {str(last).splitlines()[0]})"
+        )
 
     def quit(self):
         if self.driver:
