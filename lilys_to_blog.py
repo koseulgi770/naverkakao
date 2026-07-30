@@ -658,9 +658,7 @@ def insert_quote_block(driver, text: str) -> bool:
     pyperclip.copy(cleaned)
     safe_hotkey(driver, "ctrl", "v")
     time.sleep(0.2)
-    safe_press(driver, "enter")   # 인용 블록 종료
-    time.sleep(0.1)
-    safe_press(driver, "enter")   # 다음 일반 문단 시작
+    safe_press(driver, "enter")   # 인용 블록 종료 (다음은 호출부에서 본문 재포커스)
     time.sleep(0.15)
     return True
 
@@ -1134,64 +1132,84 @@ def post_to_naver_blog(browser: Browser, cfg: dict, title: str, content: str,
         return False
     log(f"✏️ 제목 입력 완료: {title[:30]}")
 
-    # ── 본문 포커스 ──
+    # ── 본문 영역에 포커스를 주는 헬퍼 (인용구 뒤 재포커스에 재사용) ──
     body_selectors = [
         'div.se-section-text div[contenteditable="true"]',
         'div.se-component-content div[contenteditable="true"]',
-        "div.se-text-paragraph",
         'div[contenteditable="true"]',
+        "div.se-text-paragraph",
     ]
-    focused = False
-    for sel in body_selectors:
-        try:
-            for el in driver.find_elements(By.CSS_SELECTOR, sel):
-                if el.is_displayed():
-                    try:
-                        driver.execute_script("arguments[0].click();", el)
-                    except Exception:
-                        el.click()
-                    time.sleep(0.3)
-                    focused = True
-                    break
-        except Exception:
-            continue
-        if focused:
-            break
-    if not focused:
+
+    def _focus_body() -> bool:
+        # 인용구(se-quotation) 안이 아닌, 일반 본문 문단 중 '마지막'을 클릭한다
+        for sel in body_selectors:
+            try:
+                els = driver.find_elements(By.CSS_SELECTOR, sel)
+            except Exception:
+                continue
+            for el in reversed(els):
+                try:
+                    if not el.is_displayed():
+                        continue
+                    in_quote = driver.execute_script(
+                        "return !!arguments[0].closest('.se-quotation, "
+                        "[class*=quotation]');", el)
+                    if in_quote:
+                        continue
+                    driver.execute_script(
+                        "arguments[0].scrollIntoView({block:'center'});", el)
+                    driver.execute_script("arguments[0].click();", el)
+                    time.sleep(0.25)
+                    return True
+                except Exception:
+                    continue
+        return False
+
+    if not _focus_body():
         try:
             safe_press(driver, "tab")
             time.sleep(0.3)
-            focused = True
         except Exception:
-            pass
-    if not focused:
-        log("❌ 본문 영역 포커스 실패")
-        driver.switch_to.default_content()
-        return False
+            log("❌ 본문 영역 포커스 실패")
+            driver.switch_to.default_content()
+            return False
 
-    # ── 본문 입력 (한 줄씩 붙여넣기 → 문단 유지, 인용구 자동 삽입) ──
+    # ── 본문 입력 ──
+    # 규칙: 소제목/따옴표 문장은 인용구 블록으로, 나머지는 일반 문단으로.
+    # 인용구를 넣은 뒤에는 반드시 본문 영역을 다시 클릭(_focus_body)해서
+    # 그다음 내용이 인용구 안에 딸려 들어가지 않도록 한다.
     import pyperclip
+    use_quotes = (cfg.get("transform_mode") != "raw"
+                  and cfg.get("use_quotes", "on") != "off")
     wrote_any = False
+
     for raw_line in content.split("\n"):
         line = raw_line.rstrip()
         if not line.strip():
-            safe_press(driver, "enter")
-            time.sleep(0.05)
-            continue
-        if (cfg.get("transform_mode") != "raw"
-                and cfg.get("use_quotes", "on") != "off"
-                and looks_like_quote(line)):
-            try:
-                insert_quote_block(driver, line)
-                wrote_any = True
-                continue
-            except Exception:
-                pass  # 인용구 삽입 실패 시 일반 문단으로
-        pyperclip.copy(_strip_quote_markers(line) if line.startswith(">") else line)
+            continue  # 빈 줄은 건너뜀 (문단은 아래에서 Enter로 구분)
+
+        is_quote = use_quotes and looks_like_quote(line)
+        if is_quote:
+            subtitle = _strip_quote_markers(line)
+            # 인용구는 너무 길면 소제목이 아니므로 일반 문단으로 처리
+            if len(subtitle) <= 40:
+                try:
+                    insert_quote_block(driver, subtitle)
+                    _focus_body()          # ★ 인용구 뒤 본문 영역 재클릭
+                    wrote_any = True
+                    continue
+                except Exception:
+                    pass  # 실패하면 일반 문단으로 폴백
+            line = subtitle  # 마커 제거하고 일반 문단으로
+
+        # 일반 문단 입력
+        text = _strip_quote_markers(line) if line.startswith(">") else line
+        pyperclip.copy(text)
         safe_hotkey(driver, "ctrl", "v")
         safe_press(driver, "enter")
         time.sleep(0.1)
         wrote_any = True
+
     if not wrote_any:
         log("❌ 본문 내용이 비어 있습니다")
         driver.switch_to.default_content()
