@@ -1845,10 +1845,32 @@ _UI_NOISE_PREFIX = (
     "나만의 템플릿", "더 깊이 이해하기",
 )
 
+# 이 문구가 나오면 그 아래는 본문이 아니라 하단 UI/관련영상/채팅이므로 잘라낸다
+_FOOTER_MARKERS = (
+    "다시 보고 싶은", "아카이브로 이동", "자료를 바탕으로 추가 리서치",
+    "정리해드릴까요", "정리해줘", "별로야", "시각자료", "마인드맵",
+    "인포그래픽", "애니메이션", "이해 점검하기", "플래시카드", "팟캐스트",
+    "1개 추가", "추가 리서치 수행",
+)
+
+def _truncate_footer(text: str) -> str:
+    """하단 UI/관련영상/채팅 영역을 통째로 잘라낸다."""
+    if not text:
+        return ""
+    lines_all = text.splitlines()
+    cut = len(lines_all)
+    for i, ln in enumerate(lines_all):
+        s = ln.strip()
+        if any(s.startswith(mk) for mk in _FOOTER_MARKERS):
+            cut = i
+            break
+    return "\n".join(lines_all[:cut]).strip()
+
 def _clean_scraped_text(raw: str) -> str:
     """화면에서 긁은 텍스트에서 Lilys UI 메뉴/버튼 문구 줄을 제거한다."""
     if not raw:
         return ""
+    raw = _truncate_footer(raw)
     out = []
     for line in raw.splitlines():
         s = line.strip()
@@ -1919,7 +1941,7 @@ def _copy_note_body(driver, log) -> str:
                 txt = ""
             if txt and txt != "__LILYS_EMPTY__" and len(txt.strip()) > 100:
                 log("📋 복사하기 버튼으로 본문을 가져왔습니다")
-                return txt.strip()
+                return _truncate_footer(txt.strip())
         except Exception:
             continue
     return ""
@@ -1948,7 +1970,12 @@ def fetch_note_content(browser: Browser, note_url: str, log,
 
     if report_name:
         log(f"📑 확장 리포트 '{report_name}' 적용을 시도합니다...")
-        _click_report_tab(driver, report_name, log)
+        ok = _click_report_tab(driver, report_name, log)
+        # 리포트가 실제로 열렸는지 확인용 진단은 항상 남겨 둠
+        _dump_report_debug(driver, log)
+        if not ok:
+            log("⚠️ 리포트를 확실히 열지 못했을 수 있습니다. "
+                "report_debug.txt 의 버튼/탭 목록을 보내주시면 정확히 맞추겠습니다.")
     elif summary_length and summary_length != "기본":
         _click_summary_length(driver, summary_length, log)
 
