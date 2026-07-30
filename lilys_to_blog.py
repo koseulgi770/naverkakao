@@ -1028,53 +1028,64 @@ def ensure_naver_login(driver, cfg, log) -> bool:
     return False
 
 def insert_naver_image(driver, image_path: str, log) -> bool:
-    """네이버 에디터 본문에 이미지 파일 하나를 삽입한다."""
+    """
+    네이버 에디터 본문에 이미지 파일 하나를 삽입한다.
+    이미지 툴바 버튼을 누르면 OS 파일 대화상자가 떠서 자동화가 막히므로,
+    버튼을 누르지 않고 숨겨진 file input 에 경로를 직접 넣는 방식을 우선한다.
+    """
     from selenium.webdriver.common.by import By
 
     abs_path = os.path.abspath(image_path)
 
-    def _find_file_input():
+    def _find_file_inputs():
         preferred = []
         for sel in ("input.se-image-input-file",
                     'input[class*="image"][type="file"]',
                     'input[accept*="image"][type="file"]'):
             preferred.extend(driver.find_elements(By.CSS_SELECTOR, sel))
-        all_inputs = driver.find_elements(By.CSS_SELECTOR, 'input[type="file"]')
-        return preferred + list(reversed(all_inputs))
+        preferred += driver.find_elements(By.CSS_SELECTOR, 'input[type="file"]')
+        return preferred
 
-    # 최대 2회: 이미지 툴바 버튼 클릭 → file input 대기 → 전송
-    for attempt in range(2):
-        # 이미지 툴바 버튼 클릭 (매 시도마다 다시)
-        for sel in ("button.se-image-toolbar-button",
-                    'button[data-name="image"]',
-                    'button[data-type="image"]',
-                    'button[aria-label*="사진"]',
-                    'button[aria-label*="이미지"]',
-                    "button.se-toolbar-button-image"):
-            try:
-                btn = driver.find_element(By.CSS_SELECTOR, sel)
-                if btn.is_displayed():
-                    driver.execute_script("arguments[0].click();", btn)
-                    time.sleep(0.8)
-                    break
-            except Exception:
-                continue
+    def _try_send(fi) -> bool:
+        try:
+            # 숨겨진 input 도 send_keys 가능하도록 표시 속성만 조정
+            driver.execute_script(
+                "arguments[0].style.display='block';"
+                "arguments[0].style.visibility='visible';"
+                "arguments[0].style.height='1px';arguments[0].style.width='1px';"
+                "arguments[0].removeAttribute('disabled');", fi)
+            fi.send_keys(abs_path)
+            time.sleep(4)  # 업로드 처리 대기
+            return True
+        except Exception:
+            return False
 
-        # file input 이 나타날 때까지 잠깐 대기하며 재시도
-        deadline = time.time() + 5
-        while time.time() < deadline:
-            for fi in _find_file_input():
-                try:
-                    driver.execute_script(
-                        "arguments[0].style.display='block';"
-                        "arguments[0].style.visibility='visible';"
-                        "arguments[0].removeAttribute('disabled');", fi)
-                    fi.send_keys(abs_path)
-                    time.sleep(4)  # 업로드 처리 대기
-                    return True
-                except Exception:
-                    continue
-            time.sleep(0.5)
+    # 1) 버튼 없이 바로 file input 에 전송 (OS 대화상자 회피)
+    for fi in _find_file_inputs():
+        if _try_send(fi):
+            return True
+
+    # 2) 그래도 없으면 이미지 버튼을 눌러 input 이 생기게 한 뒤 재시도
+    for sel in ("button.se-image-toolbar-button",
+                'button[data-name="image"]',
+                'button[aria-label*="사진"]',
+                'button[aria-label*="이미지"]',
+                "button.se-toolbar-button-image"):
+        try:
+            btn = driver.find_element(By.CSS_SELECTOR, sel)
+            if btn.is_displayed():
+                driver.execute_script("arguments[0].click();", btn)
+                time.sleep(1.0)
+                break
+        except Exception:
+            continue
+
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        for fi in _find_file_inputs():
+            if _try_send(fi):
+                return True
+        time.sleep(0.5)
 
     log("⚠️ 이미지 입력창을 찾지 못했습니다")
     return False
