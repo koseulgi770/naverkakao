@@ -396,7 +396,16 @@ def call_openai_text(api_key: str, prompt: str, model: str = "gpt-4o") -> str:
     return text
 
 def call_gemini_text(api_key: str, prompt: str, model: str = "gemini-2.5-flash") -> str:
-    import google.genai as genai
+    try:
+        from google import genai
+    except Exception:
+        try:
+            import google.genai as genai
+        except Exception as e:
+            raise RuntimeError(
+                "Gemini 라이브러리가 설치되지 않았습니다. 터미널에서 "
+                "'pip install google-genai' 를 실행해 주세요."
+            ) from e
     fallback = ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite"]
     chain = fallback[fallback.index(model):] if model in fallback else [model]
     last_error = None
@@ -943,43 +952,50 @@ def insert_naver_image(driver, image_path: str, log) -> bool:
     from selenium.webdriver.common.by import By
 
     abs_path = os.path.abspath(image_path)
-    # 이미지 툴바 버튼을 눌러 file input 활성화
-    for sel in ("button.se-image-toolbar-button",
-                'button[data-name="image"]',
-                'button[data-type="image"]',
-                'button[aria-label*="사진"]',
-                'button[aria-label*="이미지"]',
-                "button.se-toolbar-button-image"):
-        try:
-            btn = driver.find_element(By.CSS_SELECTOR, sel)
-            if btn.is_displayed():
-                driver.execute_script("arguments[0].click();", btn)
-                time.sleep(0.6)
-                break
-        except Exception:
-            continue
 
-    preferred = []
-    for sel in ("input.se-image-input-file",
-                'input[class*="image"][type="file"]',
-                'input[accept*="image"][type="file"]'):
-        preferred.extend(driver.find_elements(By.CSS_SELECTOR, sel))
-    all_inputs = driver.find_elements(By.CSS_SELECTOR, 'input[type="file"]')
-    seen = set()
-    for fi in preferred + list(reversed(all_inputs)):
-        try:
-            key = (fi.get_attribute("outerHTML") or "")[:200]
-            if key in seen:
+    def _find_file_input():
+        preferred = []
+        for sel in ("input.se-image-input-file",
+                    'input[class*="image"][type="file"]',
+                    'input[accept*="image"][type="file"]'):
+            preferred.extend(driver.find_elements(By.CSS_SELECTOR, sel))
+        all_inputs = driver.find_elements(By.CSS_SELECTOR, 'input[type="file"]')
+        return preferred + list(reversed(all_inputs))
+
+    # 최대 2회: 이미지 툴바 버튼 클릭 → file input 대기 → 전송
+    for attempt in range(2):
+        # 이미지 툴바 버튼 클릭 (매 시도마다 다시)
+        for sel in ("button.se-image-toolbar-button",
+                    'button[data-name="image"]',
+                    'button[data-type="image"]',
+                    'button[aria-label*="사진"]',
+                    'button[aria-label*="이미지"]',
+                    "button.se-toolbar-button-image"):
+            try:
+                btn = driver.find_element(By.CSS_SELECTOR, sel)
+                if btn.is_displayed():
+                    driver.execute_script("arguments[0].click();", btn)
+                    time.sleep(0.8)
+                    break
+            except Exception:
                 continue
-            seen.add(key)
-            driver.execute_script(
-                "arguments[0].style.display='block';"
-                "arguments[0].style.visibility='visible';", fi)
-            fi.send_keys(abs_path)
-            time.sleep(4)  # 업로드 처리 대기
-            return True
-        except Exception:
-            continue
+
+        # file input 이 나타날 때까지 잠깐 대기하며 재시도
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            for fi in _find_file_input():
+                try:
+                    driver.execute_script(
+                        "arguments[0].style.display='block';"
+                        "arguments[0].style.visibility='visible';"
+                        "arguments[0].removeAttribute('disabled');", fi)
+                    fi.send_keys(abs_path)
+                    time.sleep(4)  # 업로드 처리 대기
+                    return True
+                except Exception:
+                    continue
+            time.sleep(0.5)
+
     log("⚠️ 이미지 입력창을 찾지 못했습니다")
     return False
 
