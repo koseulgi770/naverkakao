@@ -1745,18 +1745,40 @@ def _click_report_tab(driver, report_name: str, log) -> bool:
             return el
         return None
 
+    def _robust_click(el) -> bool:
+        """네이티브 클릭이 가로막히면 상위 클릭요소·JS 클릭으로 재시도."""
+        try:
+            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
+            time.sleep(0.3)
+        except Exception:
+            pass
+        # 클릭 가능한 상위 요소(button/a/role=button/li) 우선 클릭
+        try:
+            target = driver.execute_script(
+                "return arguments[0].closest("
+                "\"button,a,li,[role='button'],[class*='card'],[class*='item']\")"
+                " || arguments[0];", el)
+        except Exception:
+            target = el
+        for attempt in (target, el):
+            try:
+                driver.execute_script("arguments[0].click();", attempt)
+                return True
+            except Exception:
+                try:
+                    attempt.click()
+                    return True
+                except Exception:
+                    continue
+        return False
+
     # 1) 이미 열린 탭이면 바로 클릭
     tab = _find_clickable(key) if key else None
     if tab:
-        try:
-            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", tab)
-            time.sleep(0.3)
-            tab.click()
+        if _robust_click(tab):
             time.sleep(4)
             log(f"📑 '{report_name}' 리포트를 열었습니다")
             return True
-        except Exception:
-            pass
 
     # 2) '확장' 버튼 클릭 → 팝업 열기
     opened = False
@@ -1783,21 +1805,19 @@ def _click_report_tab(driver, report_name: str, log) -> bool:
         card = _find_clickable(key) if key else None
         if card:
             try:
-                driver.execute_script("arguments[0].scrollIntoView({block:'center'});", card)
-                time.sleep(0.3)
-                card.click()
+                _robust_click(card)
                 time.sleep(1)
                 # '추가' 버튼이 있으면 눌러 생성/열기 진행
                 for btn in driver.find_elements(
                         By.XPATH, "//button[normalize-space(text())='추가']"):
                     try:
                         if btn.is_displayed() and btn.is_enabled():
-                            btn.click()
+                            driver.execute_script("arguments[0].click();", btn)
                             break
                     except Exception:
                         continue
                 log(f"📑 확장에서 '{report_name}' 리포트를 선택했습니다 (생성 대기)")
-                time.sleep(8)  # 리포트 생성/로딩 대기
+                time.sleep(10)  # 리포트 생성/로딩 대기
                 return True
             except Exception as e:
                 log(f"⚠️ 리포트 선택 중 오류: {e}")
