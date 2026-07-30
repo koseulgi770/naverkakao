@@ -1073,6 +1073,26 @@ def insert_naver_image(driver, image_path: str, log) -> bool:
         preferred += driver.find_elements(By.CSS_SELECTOR, 'input[type="file"]')
         return preferred
 
+    def _dismiss_upload_error() -> bool:
+        """'파일 전송 오류' 팝업이 뜨면 감지하고 확인을 눌러 닫는다. 감지되면 True."""
+        try:
+            found = driver.find_elements(
+                By.XPATH, "//*[contains(text(), '파일 전송 오류') or "
+                          "contains(text(), '전송하지 못했습니다')]")
+            if not found:
+                return False
+            for btn in driver.find_elements(
+                    By.XPATH, "//button[contains(., '확인')]"):
+                try:
+                    if btn.is_displayed():
+                        driver.execute_script("arguments[0].click();", btn)
+                        break
+                except Exception:
+                    continue
+            return True
+        except Exception:
+            return False
+
     def _try_send(fi) -> bool:
         try:
             # 숨겨진 input 도 send_keys 가능하도록 표시 속성만 조정
@@ -1083,6 +1103,10 @@ def insert_naver_image(driver, image_path: str, log) -> bool:
                 "arguments[0].removeAttribute('disabled');", fi)
             fi.send_keys(abs_path)
             time.sleep(4)  # 업로드 처리 대기
+            if _dismiss_upload_error():
+                log("⚠️ 네이버가 이미지 파일을 거부했습니다 (전송 오류) — "
+                    "원본 이미지 형식/용량 문제일 수 있습니다")
+                return False
             return True
         except Exception:
             return False
@@ -1988,28 +2012,63 @@ def _collect_note_images_old(driver, max_count: int) -> list[str]:
             continue
     return urls
 
-def download_images(urls: list[str], log) -> list[str]:
-    """이미지 URL들을 임시 폴더에 내려받아 로컬 경로 목록을 반환한다."""
+def _looks_like_image(data: bytes) -> bool:
+    """매직 바이트로 실제 이미지 파일인지 확인한다 (에러 페이지 오탐 방지)."""
+    if len(data) < 12:
+        return False
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return True
+    if data[:3] == b"\xff\xd8\xff":
+        return True
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        return True
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return True
+    return False
+
+def download_images(urls: list[str], log, referer: str = "https://lilys.ai/") -> list[str]:
+    """
+    이미지 URL들을 임시 폴더에 내려받아 로컬 경로 목록을 반환한다.
+    응답이 실제 이미지 파일인지(매직 바이트) 검증해 깨진 파일/에러 페이지를 걸러낸다.
+    """
     import tempfile
     out_dir = os.path.join(tempfile.gettempdir(), "lilys_blog_imgs")
     os.makedirs(out_dir, exist_ok=True)
     paths = []
-    headers = {"User-Agent": "Mozilla/5.0", "Referer": "https://lilys.ai/"}
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Referer": referer,
+        "Accept": "image/avif,image/webp,image/*,*/*;q=0.8",
+    }
     for i, url in enumerate(urls):
         try:
             r = requests.get(url, headers=headers, timeout=20)
             r.raise_for_status()
-            ext = ".png"
             ct = r.headers.get("Content-Type", "")
-            if "jpeg" in ct or "jpg" in ct:
+            data = r.content
+
+            if "image" not in ct and not _looks_like_image(data):
+                log(f"⚠️ 이미지 {i + 1}번이 실제 이미지가 아니어서 건너뜁니다 "
+                    f"(content-type: {ct or '알 수 없음'})")
+                continue
+            if not _looks_like_image(data):
+                log(f"⚠️ 이미지 {i + 1}번 파일이 손상되어 건너뜁니다")
+                continue
+            if len(data) < 1024:
+                log(f"⚠️ 이미지 {i + 1}번이 너무 작아(용량 {len(data)}B) 건너뜁니다")
+                continue
+
+            ext = ".png"
+            if data[:3] == b"\xff\xd8\xff":
                 ext = ".jpg"
-            elif "webp" in ct:
+            elif data[:4] == b"RIFF":
                 ext = ".webp"
-            elif "gif" in ct:
+            elif data[:6] in (b"GIF87a", b"GIF89a"):
                 ext = ".gif"
+
             p = os.path.join(out_dir, f"img_{int(time.time())}_{i}{ext}")
             with open(p, "wb") as f:
-                f.write(r.content)
+                f.write(data)
             paths.append(p)
         except Exception as e:
             log(f"⚠️ 이미지 내려받기 실패({i + 1}): {str(e)[:60]}")
@@ -2204,7 +2263,7 @@ def fetch_note_content(browser: Browser, note_url: str, log,
             urls = _collect_note_images(driver, image_max, log)
             if urls:
                 log(f"🖼️ 본문 이미지 {len(urls)}개 발견, 내려받는 중...")
-                images = download_images(urls, log)
+                images = download_images(urls, log, referer=note_url)
                 log(f"🖼️ 이미지 {len(images)}개 준비 완료")
             else:
                 log("🖼️ 가져올 본문 이미지를 찾지 못했습니다 "
