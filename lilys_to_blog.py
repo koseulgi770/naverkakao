@@ -31,6 +31,7 @@ DEFAULT_CONFIG = {
     "naver_id": "",
     "naver_pw": "",
     "naver_blog_id": "",
+    "naver_accounts": [],
     "lilys_api_key": "",
     "model_type": "gpt-4",
     "result_language": "ko",
@@ -2539,8 +2540,37 @@ class App(tk.Tk):
                          insertbackground=FG, relief="flat", font=FONT_M,
                          width=40).grid(row=row, column=1, padx=(4, 12), pady=4)
                 row += 1
+            # 로그인 페이지: 저장된 네이버 계정 선택/저장/삭제 줄
+            if step_key == "login":
+                tk.Label(page, text="저장된 네이버 계정", bg=SURFACE, fg=FG_DIM,
+                         font=FONT_M, width=26, anchor="w").grid(
+                    row=row, column=0, padx=(12, 4), pady=4, sticky="w")
+                acc_wrap = tk.Frame(page, bg=SURFACE)
+                acc_wrap.grid(row=row, column=1, padx=(4, 12), pady=4, sticky="w")
+                self._account_var = tk.StringVar()
+                self._account_combo = ttk.Combobox(
+                    acc_wrap, textvariable=self._account_var, state="readonly",
+                    values=[], font=FONT_M, width=22)
+                self._account_combo.pack(side="left")
+                self._account_combo.bind(
+                    "<<ComboboxSelected>>", lambda e: self._on_account_select())
+                tk.Button(acc_wrap, text="저장", font=("맑은 고딕", 9),
+                          bg="#0f766e", fg="white", relief="flat",
+                          padx=8, pady=2, cursor="hand2",
+                          command=self._save_account).pack(side="left", padx=3)
+                tk.Button(acc_wrap, text="삭제", font=("맑은 고딕", 9),
+                          bg="#7f1d1d", fg="white", relief="flat",
+                          padx=8, pady=2, cursor="hand2",
+                          command=self._delete_account).pack(side="left")
+                row += 1
             for key, label, secret in STEP_FIELDS[step_key]:
                 _build_field(page, key, label, secret, row)
+                row += 1
+            if step_key == "login":
+                tk.Label(page, text="↑ 아래 칸에 ID/비밀번호/블로그ID를 넣고 [저장]하면 계정으로 추가됩니다",
+                         bg=SURFACE, fg="#64748b", font=("맑은 고딕", 9),
+                         justify="left").grid(row=row, column=0, columnspan=2,
+                                              padx=12, pady=(2, 0), sticky="w")
                 row += 1
             if step_key == "write":
                 tk.Label(page, text="작성 단계는 네이버 에디터에 제목·본문·이미지를\n"
@@ -2549,6 +2579,7 @@ class App(tk.Tk):
                     row=row, column=0, columnspan=2, padx=12, pady=16, sticky="w")
 
         self._load_cfg_to_ui()
+        self._refresh_accounts_combo()
         self._show_page("source")
 
         # 버튼 행 1: 설정/로그인
@@ -2609,6 +2640,65 @@ class App(tk.Tk):
         self._log_box.tag_config("err",  foreground=ERROR)
         self._log_box.tag_config("warn", foreground=WARN)
         self._log_box.tag_config("info", foreground=FG_DIM)
+
+    # ── 네이버 다중 계정 관리 ────────────────
+    def _refresh_accounts_combo(self):
+        cfg = load_config()
+        accts = cfg.get("naver_accounts", []) or []
+        labels = [a.get("id", "") for a in accts if a.get("id")]
+        self._account_combo["values"] = labels
+        # 현재 활성 ID가 목록에 있으면 콤보에 표시
+        cur = self._cfg_vars["naver_id"].get().strip()
+        if cur in labels:
+            self._account_var.set(cur)
+
+    def _on_account_select(self):
+        cfg = load_config()
+        sel = self._account_var.get().strip()
+        for a in cfg.get("naver_accounts", []) or []:
+            if a.get("id") == sel:
+                self._cfg_vars["naver_id"].set(a.get("id", ""))
+                self._cfg_vars["naver_pw"].set(a.get("pw", ""))
+                self._cfg_vars["naver_blog_id"].set(a.get("blog_id", ""))
+                self._append_log(f"👤 계정 '{sel}' 선택됨")
+                self._save_cfg()
+                break
+
+    def _save_account(self):
+        nid = self._cfg_vars["naver_id"].get().strip()
+        npw = self._cfg_vars["naver_pw"].get().strip()
+        bid = self._cfg_vars["naver_blog_id"].get().strip()
+        if not nid or not npw:
+            messagebox.showwarning("입력 필요", "네이버 ID와 비밀번호를 먼저 입력해 주세요.")
+            return
+        cfg = load_config()
+        accts = cfg.get("naver_accounts", []) or []
+        # 같은 ID면 갱신, 없으면 추가
+        for a in accts:
+            if a.get("id") == nid:
+                a["pw"], a["blog_id"] = npw, bid
+                break
+        else:
+            accts.append({"id": nid, "pw": npw, "blog_id": bid})
+        cfg["naver_accounts"] = accts
+        save_config(cfg)
+        self._save_cfg()          # 현재 활성 계정도 저장
+        self._refresh_accounts_combo()
+        self._account_var.set(nid)
+        self._append_log(f"👤 계정 '{nid}' 저장됨 (총 {len(accts)}개)")
+
+    def _delete_account(self):
+        sel = self._account_var.get().strip()
+        if not sel:
+            return
+        cfg = load_config()
+        accts = [a for a in (cfg.get("naver_accounts", []) or [])
+                 if a.get("id") != sel]
+        cfg["naver_accounts"] = accts
+        save_config(cfg)
+        self._refresh_accounts_combo()
+        self._account_var.set("")
+        self._append_log(f"👤 계정 '{sel}' 삭제됨")
 
     # ── 단계별 설정 페이지 전환 ──────────────
     def _show_page(self, step_key: str):
