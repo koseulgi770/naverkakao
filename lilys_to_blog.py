@@ -2657,11 +2657,12 @@ def _combo_values_for(key):
     }.get(key)
 
 def _fetch_count(cfg) -> int:
-    """가져올 노트 개수. '전체'면 사실상 제한 없음(9999)."""
+    """가져올 노트 개수. '전체'면 제한 없음(9999), 숫자 입력은 1~50으로 제한된다."""
     v = str(cfg.get("max_fetch_count", 10)).strip()
     if v in ("전체", "all", ""):
         return 9999
-    return _cfg_int(cfg, "max_fetch_count", 10)
+    n = _cfg_int(cfg, "max_fetch_count", 10)
+    return max(1, min(n, 50))
 SURFACE  = "#2a2a3d"
 ACCENT   = "#7c3aed"
 ACCENT_H = "#6d28d9"
@@ -2778,6 +2779,11 @@ class App(tk.Tk):
                 # 확장 리포트: 즐겨찾기 프리셋에서 고르되 직접 입력도 가능
                 ttk.Combobox(parent, textvariable=var, state="normal",
                              values=REPORT_PRESETS, font=FONT_M, width=38).grid(
+                    row=row, column=1, padx=(4, 12), pady=4)
+            elif key == "max_fetch_count":
+                # 빠른 선택 + 1~50 사이 숫자 직접 입력도 가능
+                ttk.Combobox(parent, textvariable=var, state="normal",
+                             values=values, font=FONT_M, width=38).grid(
                     row=row, column=1, padx=(4, 12), pady=4)
             elif values:
                 ttk.Combobox(parent, textvariable=var, state="readonly",
@@ -3030,7 +3036,9 @@ class App(tk.Tk):
                 cfg[k] = DIVIDER_CODES.get(val, "on")
             elif k == "image_enabled":
                 cfg[k] = IMAGE_ENABLED_CODES.get(val, "on")
-            elif k in ("check_interval_minutes", "max_fetch_count",
+            elif k == "max_fetch_count" and val.isdigit():
+                cfg[k] = max(1, min(int(val), 50))  # 숫자 입력은 1~50으로 제한
+            elif k in ("check_interval_minutes",
                        "line_max_chars", "image_max") and val.isdigit():
                 cfg[k] = int(val)
             else:
