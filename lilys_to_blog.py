@@ -31,6 +31,8 @@ DEFAULT_CONFIG = {
     "naver_id": "",
     "naver_pw": "",
     "naver_blog_id": "",
+    "naver_category": "",
+    "browser_engine": "selenium",
     "naver_accounts": [],
     "lilys_api_key": "",
     "model_type": "gpt-4",
@@ -549,17 +551,39 @@ def safe_get(driver, url) -> bool:
         return False
 
 class Browser:
-    def __init__(self, profile_dir: str, log):
+    def __init__(self, profile_dir: str, log, engine: str = "selenium"):
         self.profile_dir = profile_dir
         self.log = log
+        self.engine = engine  # "selenium" 또는 "uc"(undetected-chromedriver)
         self.driver = None
         self._launch_lock = threading.Lock()
 
     def _launch(self):
+        os.makedirs(self.profile_dir, exist_ok=True)
+
+        if self.engine == "uc":
+            try:
+                import undetected_chromedriver as uc
+            except ImportError:
+                self.log("⚠️ undetected-chromedriver가 설치되지 않아 기본 Selenium으로 실행합니다. "
+                         "(설치하려면: pip install undetected-chromedriver)")
+            else:
+                opts = uc.ChromeOptions()
+                opts.add_argument(f"--user-data-dir={self.profile_dir}")
+                opts.add_argument("--no-first-run")
+                opts.add_argument("--no-default-browser-check")
+                opts.add_argument("--no-sandbox")
+                driver = uc.Chrome(options=opts)
+                try:
+                    driver.set_page_load_timeout(60)
+                    driver.set_script_timeout(30)
+                except Exception:
+                    pass
+                return driver
+
         from selenium import webdriver
         from selenium.webdriver.chrome.options import Options
 
-        os.makedirs(self.profile_dir, exist_ok=True)
         opts = Options()
         opts.add_argument(f"--user-data-dir={self.profile_dir}")
         opts.add_argument("--no-first-run")
@@ -770,6 +794,30 @@ def insert_quote_block(driver, text: str, style: str = "line") -> bool:
     safe_press(driver, "enter")   # 인용 블록 종료 (다음은 호출부에서 본문 재포커스)
     time.sleep(0.15)
     return True
+
+def select_naver_category(driver, category: str) -> bool:
+    """글쓰기 에디터에서 카테고리 버튼을 열고 지정한 이름의 카테고리를 선택한다."""
+    from selenium.webdriver.common.by import By
+
+    opened = _click_toolbar_button(driver, [
+        "button.se-category-btn",
+        ".category_select",
+        'button[class*="category"]',
+    ])
+    if not opened:
+        return False
+    time.sleep(1)
+
+    for sel in (".category_list li", ".se-category-list li", ".category-popup li"):
+        for item in driver.find_elements(By.CSS_SELECTOR, sel):
+            try:
+                if category in (item.text or ""):
+                    driver.execute_script("arguments[0].click();", item)
+                    time.sleep(0.4)
+                    return True
+            except Exception:
+                continue
+    return False
 
 def apply_alignment(driver, alignment: str) -> bool:
     """본문 전체 선택 후 정렬을 적용한다 (툴바 버튼 + JS 폴백)."""
@@ -1395,6 +1443,17 @@ def post_to_naver_blog(browser: Browser, cfg: dict, title: str, content: str,
             log(f"📐 {TEXT_ALIGN_LABELS.get(align, align)} 적용")
         except Exception as e:
             log(f"⚠️ 정렬 적용 실패(계속 진행): {e}")
+
+    # 카테고리 선택
+    category = (cfg.get("naver_category") or "").strip()
+    if category:
+        try:
+            if select_naver_category(driver, category):
+                log(f"🗂️ 카테고리 '{category}' 선택 완료")
+            else:
+                log(f"⚠️ 카테고리 '{category}'를 찾지 못해 기본 카테고리로 발행합니다")
+        except Exception as e:
+            log(f"⚠️ 카테고리 선택 실패(계속 진행): {e}")
 
     time.sleep(1)
 
@@ -2288,10 +2347,13 @@ class Worker:
         self._busy = threading.Lock()
 
     def _get_browser(self, cfg) -> Browser:
-        if self.browser is None or self.browser.profile_dir != cfg["chrome_profile_dir"]:
+        engine = cfg.get("browser_engine", "selenium")
+        if (self.browser is None
+                or self.browser.profile_dir != cfg["chrome_profile_dir"]
+                or self.browser.engine != engine):
             if self.browser:
                 self.browser.quit()
-            self.browser = Browser(cfg["chrome_profile_dir"], self.log)
+            self.browser = Browser(cfg["chrome_profile_dir"], self.log, engine=engine)
         return self.browser
 
     # ── 로그인용 브라우저 ──
@@ -2587,6 +2649,13 @@ POST_STEPS = [
     ("publish",   "포스팅"),
 ]
 
+# 브라우저 엔진 (일반 Selenium / 봇 탐지 우회용 undetected-chromedriver)
+BROWSER_ENGINE_LABELS = {
+    "selenium": "🧭 기본 (Selenium)",
+    "uc": "🕵️ 봇 탐지 우회 (undetected-chromedriver)",
+}
+BROWSER_ENGINE_CODES = {v: k for k, v in BROWSER_ENGINE_LABELS.items()}
+
 # 이미지 사용 여부
 IMAGE_ENABLED_LABELS = {
     "on": "🖼️ 이미지 가져오기",
@@ -2627,6 +2696,8 @@ STEP_FIELDS = {
         ("naver_id",               "네이버 ID (자동 로그인용)", False),
         ("naver_pw",               "네이버 비밀번호",       True),
         ("naver_blog_id",          "블로그 ID (blog.naver.com/여기)", False),
+        ("naver_category",         "네이버 카테고리 (선택, 비우면 미지정)", False),
+        ("browser_engine",         "브라우저 엔진",         False),
         ("chrome_profile_dir",     "크롬 프로필 폴더",      False),
     ],
     "write": [],  # 작성 단계는 별도 설정 없음 (안내만 표시)
@@ -2653,6 +2724,7 @@ def _combo_values_for(key):
         "lilys_summary_length": SUMMARY_LENGTHS,
         "image_enabled": list(IMAGE_ENABLED_LABELS.values()),
         "image_max": ["3", "5", "8", "10"],
+        "browser_engine": list(BROWSER_ENGINE_LABELS.values()),
         "max_fetch_count": ["전체", "3", "5", "10", "20", "30", "50"],
     }.get(key)
 
@@ -2763,7 +2835,7 @@ class App(tk.Tk):
         self._yt_var = tk.StringVar()
 
         # 단계별 설정 페이지를 한 자리(카드)에 겹쳐두고 하나만 보여준다
-        card = tk.Frame(self, bg=SURFACE, height=440)
+        card = tk.Frame(self, bg=SURFACE, height=480)
         card.pack(fill="x", padx=24, pady=4)
         card.pack_propagate(False)
         self._pages = {}
@@ -3008,6 +3080,9 @@ class App(tk.Tk):
             elif k == "image_enabled":
                 var.set(IMAGE_ENABLED_LABELS.get(cfg.get(k, "on"),
                                                  IMAGE_ENABLED_LABELS["on"]))
+            elif k == "browser_engine":
+                var.set(BROWSER_ENGINE_LABELS.get(cfg.get(k, "selenium"),
+                                                  BROWSER_ENGINE_LABELS["selenium"]))
             elif k == "lilys_summary_length":
                 v = cfg.get(k, "기본")
                 var.set(v if v in SUMMARY_LENGTHS else "기본")
@@ -3036,6 +3111,8 @@ class App(tk.Tk):
                 cfg[k] = DIVIDER_CODES.get(val, "on")
             elif k == "image_enabled":
                 cfg[k] = IMAGE_ENABLED_CODES.get(val, "on")
+            elif k == "browser_engine":
+                cfg[k] = BROWSER_ENGINE_CODES.get(val, "selenium")
             elif k == "max_fetch_count" and val.isdigit():
                 cfg[k] = max(1, min(int(val), 50))  # 숫자 입력은 1~50으로 제한
             elif k in ("check_interval_minutes",

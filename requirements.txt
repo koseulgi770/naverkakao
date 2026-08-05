@@ -5,3 +5,4 @@ pygetwindow>=0.0.9
 selenium>=4.20.0
 openai>=1.30.0
 google-genai>=0.3.0
+# undetected-chromedriver>=3.5.0  # 선택: 설정에서 "봇 탐지 우회" 엔진을 쓸 때만 필요
