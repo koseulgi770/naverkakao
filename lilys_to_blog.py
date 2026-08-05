@@ -366,6 +366,9 @@ def lilys_poll_result(api_key: str, request_id: str, log,
 
     raise RuntimeError("제한 시간 내에 요약 결과를 받지 못했습니다.")
 
+# AI가 명시적으로 표시한 인용구 태그: [인용구]문장[/인용구]
+_AI_QUOTE_TAG = re.compile(r"^\[인용구\](.+?)\[/인용구\]$")
+
 def markdown_to_plain(text: str) -> str:
     """블로그 붙여넣기용으로 원문을 정리·변형한다.
     - [1], [2, 3] 같은 각주 번호와 [12:34] 타임스탬프 제거
@@ -385,10 +388,12 @@ def markdown_to_plain(text: str) -> str:
     return text.strip()
 
 def looks_like_quote(line: str) -> bool:
-    """인용구 블록으로 넣을 줄인지 감지 (> 마커 또는 양끝 따옴표)."""
+    """인용구 블록으로 넣을 줄인지 감지 (AI 명시 태그 > 마커 > 양끝 따옴표 순)."""
     s = line.strip()
     if not s:
         return False
+    if _AI_QUOTE_TAG.match(s):
+        return True
     if s.startswith(">"):
         return True
     s2 = s.rstrip(".。!?！？,，")
@@ -423,7 +428,9 @@ DEFAULT_REWRITE_PROMPT = (
     "- 자연스러운 한국어 존댓말, 친근한 블로거 말투\n"
     "- 첫 줄은 클릭을 부르는 제목 한 줄 (제목: 접두어 없이 제목만)\n"
     "- 소제목은 줄 앞에 '## ' 를 붙여 구분\n"
-    "- 핵심 문장은 따옴표로 감싸 인용구로 강조\n"
+    "- 인용구로 강조하고 싶은 핵심 한 문장은 그 줄만 "
+    "[인용구]문장[/인용구] 형태로 감싸서 써 (문단 안에 섞지 말고 "
+    "독립된 줄로, 문장은 20~30자 이내로 짧게)\n"
     "- 원문의 각주 번호[1], 타임스탬프는 넣지 마\n"
     "- 마크다운 표/코드블록/링크문법은 쓰지 마\n"
     "- 사실을 지어내지 말고 원문 범위 안에서만 써\n\n"
@@ -1391,11 +1398,15 @@ def post_to_naver_blog(browser: Browser, cfg: dict, title: str, content: str,
         if not line.strip():
             continue  # 빈 줄은 건너뜀 (문단은 아래에서 Enter로 구분)
 
-        is_quote = use_quotes and looks_like_quote(line)
+        # AI가 명시적으로 표시한 [인용구]...[/인용구] 태그가 있으면 최우선으로 신뢰
+        # (따옴표 유무로 추측하는 휴리스틱보다 정확함). 없으면 기존 휴리스틱으로 판별.
+        ai_tag = _AI_QUOTE_TAG.match(line)
+        is_quote = use_quotes and (bool(ai_tag) or looks_like_quote(line))
         if is_quote:
-            subtitle = _strip_quote_markers(line)
-            # 인용구는 너무 길면 소제목이 아니므로 일반 문단으로 처리
-            if len(subtitle) <= 40:
+            subtitle = ai_tag.group(1).strip() if ai_tag else _strip_quote_markers(line)
+            # 명시적 태그는 길이 제한 없이 신뢰, 휴리스틱 판별은 너무 길면 소제목이
+            # 아닐 수 있으므로 일반 문단으로 처리
+            if ai_tag or len(subtitle) <= 40:
                 try:
                     if use_divider:
                         insert_naver_divider(driver)   # 소제목 앞 구분선
@@ -1407,6 +1418,11 @@ def post_to_naver_blog(browser: Browser, cfg: dict, title: str, content: str,
                 except Exception:
                     pass  # 실패하면 일반 문단으로 폴백
             line = subtitle  # 마커 제거하고 일반 문단으로
+        elif not use_quotes:
+            # 인용구를 안 쓰기로 했으면 AI 태그만 벗겨내고 일반 문단으로
+            m = _AI_QUOTE_TAG.match(line)
+            if m:
+                line = m.group(1).strip()
 
         # 일반 문단 입력
         text = _strip_quote_markers(line) if line.startswith(">") else line
