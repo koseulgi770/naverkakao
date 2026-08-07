@@ -40,6 +40,7 @@ DEFAULT_CONFIG = {
     "check_interval_minutes": 30,
     "watch_mode": "interval",   # "interval"(주기마다) / "daily"(매일 정해진 시각)
     "watch_daily_time": "09:00",
+    "auto_start_watch": "off",
     "lilys_folder_name": "",
     "max_fetch_count": 10,
     "lilys_report_name": "",
@@ -2706,6 +2707,13 @@ WATCH_MODE_LABELS = {
 }
 WATCH_MODE_CODES = {v: k for k, v in WATCH_MODE_LABELS.items()}
 
+# 프로그램 시작 시 감시 자동 시작 여부
+WATCH_AUTOSTART_LABELS = {
+    "off": "🚫 수동으로 시작",
+    "on": "🚀 프로그램 켜지면 자동 시작",
+}
+WATCH_AUTOSTART_CODES = {v: k for k, v in WATCH_AUTOSTART_LABELS.items()}
+
 # 이미지 사용 여부
 IMAGE_ENABLED_LABELS = {
     "on": "🖼️ 이미지 가져오기",
@@ -2757,6 +2765,7 @@ STEP_FIELDS = {
         ("watch_mode",             "감시 방식",             False),
         ("check_interval_minutes", "라이브러리 체크 주기 (분)", False),
         ("watch_daily_time",       "매일 확인 시각 (예: 09:00)", False),
+        ("auto_start_watch",       "프로그램 실행 시 감시 시작", False),
     ],
 }
 
@@ -2778,6 +2787,7 @@ def _combo_values_for(key):
         "image_max": ["3", "5", "8", "10"],
         "browser_engine": list(BROWSER_ENGINE_LABELS.values()),
         "watch_mode": list(WATCH_MODE_LABELS.values()),
+        "auto_start_watch": list(WATCH_AUTOSTART_LABELS.values()),
         "max_fetch_count": ["전체", "3", "5", "10", "20", "30", "50"],
     }.get(key)
 
@@ -2871,6 +2881,15 @@ class App(tk.Tk):
 
         self._worker = Worker(log_fn=self._append_log, step_fn=self._on_step)
         self._build_ui()
+        self.after(2000, self._auto_start_watch_if_needed)
+
+    def _auto_start_watch_if_needed(self):
+        """'프로그램 실행 시 감시 시작'이 켜져 있으면 자동으로 감시를 시작한다."""
+        cfg = load_config()
+        if cfg.get("auto_start_watch") == "on" and not self._worker._watching:
+            self._append_log("🚀 설정에 따라 라이브러리 감시를 자동으로 시작합니다")
+            self._worker.start_watching(cfg)
+            self._btn_watch.config(text="⏹ 라이브러리 감시 중지", bg="#7f1d1d")
 
     def _build_ui(self):
         tk.Label(self, text="Lilys AI → 네이버 블로그 자동 포스팅",
@@ -3139,6 +3158,9 @@ class App(tk.Tk):
             elif k == "watch_mode":
                 var.set(WATCH_MODE_LABELS.get(cfg.get(k, "interval"),
                                               WATCH_MODE_LABELS["interval"]))
+            elif k == "auto_start_watch":
+                var.set(WATCH_AUTOSTART_LABELS.get(cfg.get(k, "off"),
+                                                   WATCH_AUTOSTART_LABELS["off"]))
             elif k == "lilys_summary_length":
                 v = cfg.get(k, "기본")
                 var.set(v if v in SUMMARY_LENGTHS else "기본")
@@ -3171,6 +3193,8 @@ class App(tk.Tk):
                 cfg[k] = BROWSER_ENGINE_CODES.get(val, "selenium")
             elif k == "watch_mode":
                 cfg[k] = WATCH_MODE_CODES.get(val, "interval")
+            elif k == "auto_start_watch":
+                cfg[k] = WATCH_AUTOSTART_CODES.get(val, "off")
             elif k == "max_fetch_count" and val.isdigit():
                 cfg[k] = max(1, min(int(val), 50))  # 숫자 입력은 1~50으로 제한
             elif k in ("check_interval_minutes",
