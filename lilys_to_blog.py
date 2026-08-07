@@ -38,6 +38,8 @@ DEFAULT_CONFIG = {
     "model_type": "gpt-4",
     "result_language": "ko",
     "check_interval_minutes": 30,
+    "watch_mode": "interval",   # "interval"(주기마다) / "daily"(매일 정해진 시각)
+    "watch_daily_time": "09:00",
     "lilys_folder_name": "",
     "max_fetch_count": 10,
     "lilys_report_name": "",
@@ -2592,12 +2594,31 @@ class Worker:
     def stop_watching(self):
         self._watching = False
 
+    def _next_wait_seconds(self, cfg) -> int:
+        """감시 방식에 따른 다음 확인까지 대기 시간(초)."""
+        if cfg.get("watch_mode", "interval") == "daily":
+            from datetime import datetime, timedelta
+            hh_mm = (cfg.get("watch_daily_time") or "09:00").strip()
+            try:
+                hh, mm = (int(x) for x in hh_mm.split(":")[:2])
+            except Exception:
+                hh, mm = 9, 0
+            now = datetime.now()
+            target = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+            if target <= now:
+                target += timedelta(days=1)
+            return int((target - now).total_seconds())
+        return max(int(cfg.get("check_interval_minutes", 30)), 5) * 60
+
     def _watch_loop(self, cfg):
         posted = load_posted()
-        interval = max(int(cfg.get("check_interval_minutes", 30)), 5) * 60
         first_scan = len(posted) == 0
+        daily = cfg.get("watch_mode", "interval") == "daily"
 
-        self.log("▶ 라이브러리 감시 시작")
+        if daily:
+            self.log(f"▶ 라이브러리 감시 시작 (매일 {cfg.get('watch_daily_time', '09:00')} 확인)")
+        else:
+            self.log("▶ 라이브러리 감시 시작")
         while self._watching:
             if self._busy.acquire(blocking=False):
                 try:
@@ -2644,7 +2665,13 @@ class Worker:
             else:
                 self.log("⚠️ 다른 작업이 진행 중이라 이번 주기를 건너뜁니다.")
 
-            for _ in range(interval):
+            wait_sec = self._next_wait_seconds(cfg)
+            if daily:
+                hrs = wait_sec // 3600
+                mins = (wait_sec % 3600) // 60
+                self.log(f"⏳ 다음 확인까지 대기 (약 {hrs}시간 {mins}분 후, "
+                        f"{cfg.get('watch_daily_time', '09:00')})")
+            for _ in range(wait_sec):
                 if not self._watching:
                     break
                 time.sleep(1)
@@ -2671,6 +2698,13 @@ BROWSER_ENGINE_LABELS = {
     "uc": "🕵️ 봇 탐지 우회 (undetected-chromedriver)",
 }
 BROWSER_ENGINE_CODES = {v: k for k, v in BROWSER_ENGINE_LABELS.items()}
+
+# 라이브러리 감시 방식
+WATCH_MODE_LABELS = {
+    "interval": "⏱️ 주기마다 확인",
+    "daily": "📅 매일 정해진 시각에 확인",
+}
+WATCH_MODE_CODES = {v: k for k, v in WATCH_MODE_LABELS.items()}
 
 # 이미지 사용 여부
 IMAGE_ENABLED_LABELS = {
@@ -2720,7 +2754,9 @@ STEP_FIELDS = {
     "publish": [
         ("publish_mode",           "발행 방식",             False),
         ("schedule_time",          "예약 시간 (예: 2026-07-15 09:00)", False),
+        ("watch_mode",             "감시 방식",             False),
         ("check_interval_minutes", "라이브러리 체크 주기 (분)", False),
+        ("watch_daily_time",       "매일 확인 시각 (예: 09:00)", False),
     ],
 }
 
@@ -2741,6 +2777,7 @@ def _combo_values_for(key):
         "image_enabled": list(IMAGE_ENABLED_LABELS.values()),
         "image_max": ["3", "5", "8", "10"],
         "browser_engine": list(BROWSER_ENGINE_LABELS.values()),
+        "watch_mode": list(WATCH_MODE_LABELS.values()),
         "max_fetch_count": ["전체", "3", "5", "10", "20", "30", "50"],
     }.get(key)
 
@@ -3099,6 +3136,9 @@ class App(tk.Tk):
             elif k == "browser_engine":
                 var.set(BROWSER_ENGINE_LABELS.get(cfg.get(k, "selenium"),
                                                   BROWSER_ENGINE_LABELS["selenium"]))
+            elif k == "watch_mode":
+                var.set(WATCH_MODE_LABELS.get(cfg.get(k, "interval"),
+                                              WATCH_MODE_LABELS["interval"]))
             elif k == "lilys_summary_length":
                 v = cfg.get(k, "기본")
                 var.set(v if v in SUMMARY_LENGTHS else "기본")
@@ -3129,6 +3169,8 @@ class App(tk.Tk):
                 cfg[k] = IMAGE_ENABLED_CODES.get(val, "on")
             elif k == "browser_engine":
                 cfg[k] = BROWSER_ENGINE_CODES.get(val, "selenium")
+            elif k == "watch_mode":
+                cfg[k] = WATCH_MODE_CODES.get(val, "interval")
             elif k == "max_fetch_count" and val.isdigit():
                 cfg[k] = max(1, min(int(val), 50))  # 숫자 입력은 1~50으로 제한
             elif k in ("check_interval_minutes",
