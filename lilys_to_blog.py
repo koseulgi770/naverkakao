@@ -1647,33 +1647,48 @@ def _looks_like_note_card(text: str) -> bool:
     return bool(re.search(r"20\d{2}[.\-/]\s?\d{1,2}[.\-/]\s?\d{1,2}", text)
                 or "유튜브" in text or "YouTube" in text.lower())
 
-def _click_collect_notes(driver, log, max_notes: int = 30) -> list[tuple[str, str]]:
+def _card_title(card_text: str) -> str:
+    """카드 블록 텍스트에서 제목으로 쓸 줄(가장 긴 줄)을 뽑는다."""
+    lines = [ln.strip() for ln in card_text.splitlines() if ln.strip()]
+    return max(lines, key=len) if lines else card_text[:60]
+
+def _click_collect_notes(driver, log, max_notes: int = 30,
+                         known_titles: set | None = None) -> list[tuple[str, str]]:
     """
     노트 카드가 링크(<a>)가 아닌 화면에서, 카드를 하나씩 클릭해
     이동한 주소를 수집하고 뒤로가기로 돌아온다.
+    known_titles가 주어지면 이미 아는 제목의 카드는 클릭하지 않고 건너뛴다
+    ('이어서 가져오기' 모드에서 이미 수집한 노트를 다시 여는 시간을 아낀다).
     실패한 카드는 한 번 더 시도하고, 최종 수집 결과를 로그로 알린다.
     """
     from selenium.webdriver.common.by import By
     from selenium.webdriver.common.keys import Keys
 
+    known_titles = known_titles or set()
     base_url = driver.current_url
     # 지연 로딩/무한스크롤 라이브러리 대비: 카드 수가 안 늘 때까지 스크롤
     _scroll_page(driver)
     prev = -1
     for _ in range(8):
         cards_now = [t for t in _mark_cards(driver) if _looks_like_note_card(t)]
+        new_cards = [t for t in cards_now if _card_title(t) not in known_titles]
         if len(cards_now) <= prev:
             break
         prev = len(cards_now)
         _scroll_page(driver)
-        if len(cards_now) >= max_notes:
+        if len(new_cards) >= max_notes:
             break
 
-    card_texts = _mark_cards(driver)
-    targets = [t for t in card_texts if _looks_like_note_card(t)][:max_notes]
+    card_texts = [t for t in _mark_cards(driver) if _looks_like_note_card(t)]
+    if known_titles:
+        skipped = sum(1 for t in card_texts if _card_title(t) in known_titles)
+        card_texts = [t for t in card_texts if _card_title(t) not in known_titles]
+        if skipped:
+            log(f"⏭ 이미 가져온 노트 {skipped}개는 건너뜁니다 (이어서 가져오기)")
+    targets = card_texts[:max_notes]
     if not targets:
         return []
-    log(f"🃏 노트 카드 {len(targets)}개를 발견했습니다. 하나씩 열어 주소를 수집합니다...")
+    log(f"🃏 새 노트 카드 {len(targets)}개를 발견했습니다. 하나씩 열어 주소를 수집합니다...")
 
     def _open_card(card_text):
         """카드를 클릭해 이동한 주소를 반환. 실패하면 None."""
@@ -1730,8 +1745,7 @@ def _click_collect_notes(driver, log, max_notes: int = 30) -> list[tuple[str, st
             url = _open_card(card_text)
             if url and url not in seen_urls:
                 seen_urls.add(url)
-                lines = [ln.strip() for ln in card_text.splitlines() if ln.strip()]
-                title = max(lines, key=len) if lines else card_text[:60]
+                title = _card_title(card_text)
                 collected.append((url, title))
                 log(f"  ✔ 수집 {len(collected)}/{len(targets)}: {title[:40]}")
             elif not url:
@@ -1767,11 +1781,15 @@ def _wait_and_collect(driver, timeout_sec: int = 20) -> list[tuple[str, str]]:
 
 def fetch_collection_notes(browser: Browser, log,
                            folder_name: str = "",
-                           max_notes: int = 30) -> list[tuple[str, str]]:
+                           max_notes: int = 30,
+                           known_titles: set | None = None,
+                           known_urls: set | None = None) -> list[tuple[str, str]]:
     """
     라이브러리(또는 보관함) 페이지에서 (노트URL, 제목) 목록을 수집한다.
     folder_name 이 지정되면 사이드바에서 해당 폴더를 클릭한 뒤 수집한다.
     max_notes 개수만큼만 수집한다.
+    known_titles/known_urls 가 주어지면 이미 아는 노트는 건너뛰고 새 노트만 모은다
+    ('이어서 가져오기' 모드).
     """
     from selenium.webdriver.common.by import By
 
@@ -1818,9 +1836,15 @@ def fetch_collection_notes(browser: Browser, log,
                 log(f"⚠️ '{folder_name}' 폴더를 찾지 못했습니다. 전체 목록에서 수집합니다.")
 
         notes = _wait_and_collect(driver, timeout_sec=10)
+        if notes and known_urls:
+            before = len(notes)
+            notes = [(u, t) for u, t in notes if u not in known_urls]
+            if before != len(notes):
+                log(f"⏭ 이미 가져온 노트 {before - len(notes)}개는 건너뜁니다 (이어서 가져오기)")
         if not notes:
             # 링크가 전혀 없는 화면(클릭 카드 방식)이면 카드를 눌러가며 주소 수집
-            notes = _click_collect_notes(driver, log, max_notes=max_notes)
+            notes = _click_collect_notes(driver, log, max_notes=max_notes,
+                                         known_titles=known_titles)
         if notes:
             notes = notes[:max_notes]
             break
@@ -2444,22 +2468,54 @@ class Worker:
         threading.Thread(target=_run, daemon=True).start()
 
     # ── 라이브러리 목록 불러오기 / 선택 발행 ──
-    def fetch_notes_async(self, cfg, on_done):
-        """라이브러리의 (URL, 제목) 목록을 가져와 on_done(notes) 콜백으로 전달한다."""
+    def fetch_notes_async(self, cfg, on_done, resume: bool = False):
+        """
+        라이브러리의 (URL, 제목) 목록을 가져와 on_done(notes) 콜백으로 전달한다.
+        resume=True 면 이전에 캐시해 둔 목록에 새로 찾은 것만 이어붙인다
+        ('이어서 가져오기'). False면 처음부터 새로 수집한다('처음부터 다시 가져오기').
+        """
         def _run():
             if not self._busy.acquire(blocking=False):
                 self.log("⚠️ 이미 작업이 진행 중입니다.")
                 return
             try:
                 self.step("source")
-                self.log("📥 라이브러리 목록을 불러오는 중...")
+                cached, _ = load_notes_cache() if resume else ([], "")
+                known_titles = {t for _u, t in cached}
+                known_urls = {u for u, _t in cached}
+
+                if resume and cached:
+                    self.log(f"📥 이어서 가져오는 중... (기존 {len(cached)}개 + 새 노트 탐색)")
+                else:
+                    self.log("📥 라이브러리 목록을 불러오는 중...")
+
                 browser = self._get_browser(cfg)
-                notes = fetch_collection_notes(
+                new_notes = fetch_collection_notes(
                     browser, self.log, cfg.get("lilys_folder_name", ""),
-                    max_notes=_fetch_count(cfg))
+                    max_notes=_fetch_count(cfg),
+                    known_titles=known_titles if resume else None,
+                    known_urls=known_urls if resume else None)
+
+                if resume:
+                    # 기존 목록 뒤에 새로 찾은 것만 이어붙임 (중복 URL 방지)
+                    merged = list(cached)
+                    seen = known_urls
+                    for u, t in new_notes:
+                        if u not in seen:
+                            merged.append((u, t))
+                            seen.add(u)
+                    notes = merged
+                    if new_notes:
+                        self.log(f"🆕 새 노트 {len(new_notes)}개를 이어붙였습니다 "
+                                f"(총 {len(notes)}개)")
+                    else:
+                        self.log("ℹ️ 새로 찾은 노트가 없습니다. 기존 목록을 그대로 사용합니다.")
+                else:
+                    notes = new_notes
+
                 if notes:
                     save_notes_cache(notes)
-                    self.log(f"🔍 라이브러리에서 노트 {len(notes)}개를 찾아 저장했습니다")
+                    self.log(f"🔍 라이브러리 노트 {len(notes)}개 준비 완료")
                     on_done(notes)
                 else:
                     self.log("⚠️ 라이브러리에서 노트를 찾지 못했습니다. Lilys 로그인 상태를 확인해 주세요.")
@@ -2792,12 +2848,11 @@ def _combo_values_for(key):
     }.get(key)
 
 def _fetch_count(cfg) -> int:
-    """가져올 노트 개수. '전체'면 제한 없음(9999), 숫자 입력은 1~50으로 제한된다."""
+    """가져올 노트 개수. '전체'면 제한 없음(9999), 숫자 입력은 입력한 값 그대로 쓴다."""
     v = str(cfg.get("max_fetch_count", 10)).strip()
     if v in ("전체", "all", ""):
         return 9999
-    n = _cfg_int(cfg, "max_fetch_count", 10)
-    return max(1, min(n, 50))
+    return _cfg_int(cfg, "max_fetch_count", 10)
 SURFACE  = "#2a2a3d"
 ACCENT   = "#7c3aed"
 ACCENT_H = "#6d28d9"
@@ -3196,7 +3251,7 @@ class App(tk.Tk):
             elif k == "auto_start_watch":
                 cfg[k] = WATCH_AUTOSTART_CODES.get(val, "off")
             elif k == "max_fetch_count" and val.isdigit():
-                cfg[k] = max(1, min(int(val), 50))  # 숫자 입력은 1~50으로 제한
+                cfg[k] = max(1, int(val))  # 입력한 숫자를 그대로 사용 (상한 없음)
             elif k in ("check_interval_minutes",
                        "line_max_chars", "image_max") and val.isdigit():
                 cfg[k] = int(val)
@@ -3241,16 +3296,63 @@ class App(tk.Tk):
         cfg = self._save_cfg()
         cached, updated_at = load_notes_cache()
         if cached:
-            # 저장된 목록이 있으면 크롤링 없이 바로 표시 (창 안에서 새로고침 가능)
-            self.after(0, self._show_note_picker, cfg, cached, updated_at)
+            # 저장된 목록이 있으면 바로 보여주되, 이어서/처음부터 중 고를 수 있게 안내
+            self._show_fetch_choice_dialog(cfg, cached, updated_at)
         else:
             self._worker.fetch_notes_async(
                 cfg, lambda notes: self.after(0, self._show_note_picker, cfg, notes, ""))
 
+    def _show_fetch_choice_dialog(self, cfg, cached, updated_at):
+        """저장된 목록이 있을 때 '이어서 가져오기' vs '처음부터 다시 가져오기'를 고르는 창."""
+        win = tk.Toplevel(self)
+        win.title("라이브러리 가져오기")
+        win.geometry("420x220")
+        win.configure(bg=BG)
+        win.transient(self)
+        win.grab_set()
+
+        tk.Label(win, text="저장된 노트 목록이 있습니다", bg=BG, fg=FG,
+                 font=FONT_B).pack(pady=(20, 4))
+        tk.Label(win, text=f"글감 {len(cached)}개 · {updated_at} 기준",
+                 bg=BG, fg=FG_DIM, font=FONT_M).pack(pady=(0, 16))
+
+        def _go_saved():
+            win.destroy()
+            self.after(0, self._show_note_picker, cfg, cached, updated_at)
+
+        def _go_resume():
+            win.destroy()
+            self._worker.fetch_notes_async(
+                cfg, lambda notes: self.after(0, self._show_note_picker, cfg, notes, ""),
+                resume=True)
+
+        def _go_fresh():
+            win.destroy()
+            self._worker.fetch_notes_async(
+                cfg, lambda notes: self.after(0, self._show_note_picker, cfg, notes, ""),
+                resume=False)
+
+        tk.Button(win, text="📂 저장된 목록 그대로 보기", font=FONT_B,
+                  bg="#334155", fg="white", activebackground="#1e293b",
+                  activeforeground="white", relief="flat",
+                  padx=12, pady=8, cursor="hand2", width=28,
+                  command=_go_saved).pack(pady=4)
+        tk.Button(win, text="🔄 이어서 가져오기 (새 노트만 추가)", font=FONT_B,
+                  bg="#1d4ed8", fg="white", activebackground="#1e40af",
+                  activeforeground="white", relief="flat",
+                  padx=12, pady=8, cursor="hand2", width=28,
+                  command=_go_resume).pack(pady=4)
+        tk.Button(win, text="🆕 처음부터 다시 가져오기", font=FONT_B,
+                  bg="#b45309", fg="white", activebackground="#92400e",
+                  activeforeground="white", relief="flat",
+                  padx=12, pady=8, cursor="hand2", width=28,
+                  command=_go_fresh).pack(pady=4)
+
     def _refresh_library(self, cfg, old_win):
         old_win.destroy()
         self._worker.fetch_notes_async(
-            cfg, lambda notes: self.after(0, self._show_note_picker, cfg, notes, ""))
+            cfg, lambda notes: self.after(0, self._show_note_picker, cfg, notes, ""),
+            resume=False)
 
     def _show_note_picker(self, cfg, notes, updated_at=""):
         """라이브러리 노트 목록: 체크로 선택, 미리보기, 상태 표시가 있는 창."""
