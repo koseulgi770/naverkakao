@@ -3559,15 +3559,64 @@ class App(tk.Tk):
         else:
             messagebox.showwarning("입력 확인", "유튜브 링크 또는 lilys.ai 노트 링크만 지원합니다.")
 
+    def _ask_note_count(self, cfg, on_confirm, title="가져올 개수 선택"):
+        """라이브러리에서 가져올(또는 감시할) 노트 개수를 물어보는 창.
+        확인을 누르면 on_confirm(count_str)을 호출한다 ("전체" 또는 숫자 문자열)."""
+        from tkinter import ttk
+
+        win = tk.Toplevel(self)
+        win.title(title)
+        win.geometry("380x180")
+        win.configure(bg=BG)
+        win.transient(self)
+        win.grab_set()
+
+        tk.Label(win, text=title, bg=BG, fg=FG, font=FONT_B).pack(pady=(20, 4))
+        tk.Label(win, text="숫자를 고르거나 직접 입력하세요 (최대 50개, '전체'도 가능)",
+                 bg=BG, fg=FG_DIM, font=("맑은 고딕", 9)).pack(pady=(0, 10))
+
+        var = tk.StringVar(value=str(cfg.get("max_fetch_count", 10)))
+        combo = ttk.Combobox(win, textvariable=var, state="normal",
+                              values=["전체", "3", "5", "10", "20", "30", "50"],
+                              font=FONT_M, width=18)
+        combo.pack(pady=4)
+
+        def _confirm():
+            v = var.get().strip()
+            if v != "전체":
+                if not v.isdigit() or int(v) < 1:
+                    messagebox.showwarning("입력 오류",
+                                            "1 이상의 숫자 또는 '전체'를 입력해 주세요.",
+                                            parent=win)
+                    return
+                v = str(min(int(v), 50))
+            win.destroy()
+            on_confirm(v)
+
+        btn_row = tk.Frame(win, bg=BG)
+        btn_row.pack(pady=14)
+        tk.Button(btn_row, text="확인", font=FONT_B, bg=ACCENT, fg="white",
+                  activebackground=ACCENT_H, activeforeground="white",
+                  relief="flat", padx=16, pady=6, cursor="hand2",
+                  command=_confirm).pack(side="left", padx=6)
+        tk.Button(btn_row, text="취소", font=FONT_B, bg="#475569", fg="white",
+                  relief="flat", padx=16, pady=6, cursor="hand2",
+                  command=win.destroy).pack(side="left", padx=6)
+
     def _on_pick_from_library(self):
         cfg = self._save_cfg()
-        cached, updated_at = load_notes_cache()
-        if cached:
-            # 저장된 목록이 있으면 바로 보여주되, 이어서/처음부터 중 고를 수 있게 안내
-            self._show_fetch_choice_dialog(cfg, cached, updated_at)
-        else:
-            self._worker.fetch_notes_async(
-                cfg, lambda notes: self.after(0, self._show_note_picker, cfg, notes, ""))
+
+        def _proceed(count_str):
+            cfg["max_fetch_count"] = count_str
+            cached, updated_at = load_notes_cache()
+            if cached:
+                # 저장된 목록이 있으면 바로 보여주되, 이어서/처음부터 중 고를 수 있게 안내
+                self._show_fetch_choice_dialog(cfg, cached, updated_at)
+            else:
+                self._worker.fetch_notes_async(
+                    cfg, lambda notes: self.after(0, self._show_note_picker, cfg, notes, ""))
+
+        self._ask_note_count(cfg, _proceed, title="라이브러리에서 가져올 노트 개수")
 
     def _show_fetch_choice_dialog(self, cfg, cached, updated_at):
         """저장된 목록이 있을 때 '이어서 가져오기' vs '처음부터 다시 가져오기'를 고르는 창."""
@@ -3844,8 +3893,13 @@ class App(tk.Tk):
             self._btn_watch.config(text="👀 라이브러리 감시 시작", bg="#b45309")
         else:
             cfg = self._save_cfg()
-            self._worker.start_watching(cfg)
-            self._btn_watch.config(text="⏹ 라이브러리 감시 중지", bg="#7f1d1d")
+
+            def _proceed(count_str):
+                cfg["max_fetch_count"] = count_str
+                self._worker.start_watching(cfg)
+                self._btn_watch.config(text="⏹ 라이브러리 감시 중지", bg="#7f1d1d")
+
+            self._ask_note_count(cfg, _proceed, title="감시할 때마다 확인할 노트 개수")
 
     # ── 진행 단계 표시 ───────────────────────
     def _on_step(self, key: str):
