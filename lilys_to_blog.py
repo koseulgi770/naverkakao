@@ -55,6 +55,7 @@ DEFAULT_CONFIG = {
     "paragraph_style": "para",
     "line_max_chars": 30,
     "use_quotes": "on",
+    "use_bold": "on",
     "quote_style": "line",
     "use_divider": "on",
     "text_align": "left",
@@ -97,6 +98,13 @@ USE_QUOTES_LABELS = {
     "off": "🚫 인용구 사용 안 함",
 }
 USE_QUOTES_CODES = {v: k for k, v in USE_QUOTES_LABELS.items()}
+
+# 볼드 강조 사용 여부
+USE_BOLD_LABELS = {
+    "on": "🔤 볼드 강조 사용",
+    "off": "🚫 볼드 강조 안 함",
+}
+USE_BOLD_CODES = {v: k for k, v in USE_BOLD_LABELS.items()}
 
 # 인용구(소제목) 스타일 — SE 에디터 인용구 팝업의 몇 번째 스타일을 쓸지
 QUOTE_STYLE_LABELS = {
@@ -204,6 +212,9 @@ def prepare_body(cfg: dict, body: str) -> str:
         text = airy_format(text, max_len=_cfg_int(cfg, "line_max_chars", 30))
     elif style == "para":
         text = para_format(text)
+    if cfg.get("use_bold", "on") == "off":
+        # 볼드 강조를 안 쓰기로 했으면 **마커만 제거하고 텍스트는 그대로 둔다
+        text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)
     return text
 
 def load_config() -> dict:
@@ -382,8 +393,8 @@ def markdown_to_plain(text: str) -> str:
     text = re.sub(r"\[\d+(?:[,\s]+\d+)*\]", "", text)              # [1], [2, 3] 각주 제거
     text = re.sub(r"\[?\b\d{1,2}:\d{2}(?::\d{2})?\]?", "", text)   # 12:34 타임스탬프 제거
     text = re.sub(r"^#{1,6}\s*(.+)$", r"> \1", text, flags=re.M)   # 헤딩 → 인용구 후보
-    text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)                   # 굵게
-    text = re.sub(r"\*(.+?)\*", r"\1", text)                       # 기울임
+    # **굵게**는 발행 단계에서 실제 볼드로 적용하기 위해 마커를 남겨둔다 (prepare_body 참고)
+    text = re.sub(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)", r"\1", text)  # 기울임(단일 *)만 제거
     text = re.sub(r"^[-*]\s+", "· ", text, flags=re.M)             # 리스트 불릿
     text = re.sub(r"[ \t]{2,}", " ", text)                         # 연속 공백 정리
     text = re.sub(r"[ \t]+([.,!?。，])", r"\1", text)              # 구두점 앞 공백 제거
@@ -434,6 +445,8 @@ DEFAULT_REWRITE_PROMPT = (
     "- 인용구로 강조하고 싶은 핵심 한 문장은 그 줄만 "
     "[인용구]문장[/인용구] 형태로 감싸서 써 (문단 안에 섞지 말고 "
     "독립된 줄로, 문장은 20~30자 이내로 짧게)\n"
+    "- 문단 안에서 특히 중요한 단어나 짧은 구절(3~10자 정도)은 "
+    "**단어** 형태로 감싸서 볼드로 강조해 (문단 하나에 1~2곳 정도만, 남발하지 마)\n"
     "- 원문의 각주 번호[1], 타임스탬프는 넣지 마\n"
     "- 마크다운 표/코드블록/링크문법은 쓰지 마\n"
     "- 사실을 지어내지 말고 원문 범위 안에서만 써\n\n"
@@ -714,6 +727,35 @@ def paste_text(driver, element, text: str, clear: bool = False):
     pyperclip.copy(text)
     safe_hotkey(driver, "ctrl", "v")
     time.sleep(0.4)
+
+_BOLD_MARKER = re.compile(r"\*\*(.+?)\*\*")
+
+def paste_line_with_bold(driver, line: str):
+    """
+    한 줄을 붙여넣되, **볼드**로 감싼 구간만 실제 볼드 서식으로 입력한다.
+    (Ctrl+B로 볼드를 켜고 그 구간만 붙여넣은 뒤 다시 꺼서 이어서 일반 텍스트로 계속)
+    """
+    import pyperclip
+
+    pos = 0
+    for m in _BOLD_MARKER.finditer(line):
+        before = line[pos:m.start()]
+        if before:
+            pyperclip.copy(before)
+            safe_hotkey(driver, "ctrl", "v")
+        bold_text = m.group(1)
+        if bold_text:
+            safe_hotkey(driver, "ctrl", "b")
+            time.sleep(0.1)
+            pyperclip.copy(bold_text)
+            safe_hotkey(driver, "ctrl", "v")
+            time.sleep(0.1)
+            safe_hotkey(driver, "ctrl", "b")
+        pos = m.end()
+    rest = line[pos:]
+    if rest:
+        pyperclip.copy(rest)
+        safe_hotkey(driver, "ctrl", "v")
 
 def _click_if_exists(driver, css: str) -> bool:
     from selenium.webdriver.common.by import By
@@ -1383,6 +1425,7 @@ def post_to_naver_blog(browser: Browser, cfg: dict, title: str, content: str,
     import pyperclip
     use_quotes = (cfg.get("transform_mode") != "raw"
                   and cfg.get("use_quotes", "on") != "off")
+    use_bold = cfg.get("use_bold", "on") != "off"
     quote_style = cfg.get("quote_style", "line")
     use_divider = (cfg.get("transform_mode") != "raw"
                    and cfg.get("use_divider", "on") != "off")
@@ -1427,10 +1470,13 @@ def post_to_naver_blog(browser: Browser, cfg: dict, title: str, content: str,
             if m:
                 line = m.group(1).strip()
 
-        # 일반 문단 입력
+        # 일반 문단 입력 (**볼드** 구간이 있으면 실제 볼드 서식으로 입력)
         text = _strip_quote_markers(line) if line.startswith(">") else line
-        pyperclip.copy(text)
-        safe_hotkey(driver, "ctrl", "v")
+        if use_bold and _BOLD_MARKER.search(text):
+            paste_line_with_bold(driver, text)
+        else:
+            pyperclip.copy(_BOLD_MARKER.sub(r"\1", text))
+            safe_hotkey(driver, "ctrl", "v")
         safe_press(driver, "enter")
         time.sleep(0.1)
         wrote_any = True
@@ -2802,6 +2848,7 @@ STEP_FIELDS = {
         ("paragraph_style",        "문단 나누기",           False),
         ("line_max_chars",         "한 줄 글자 수 (줄바꿈 기준)", False),
         ("use_quotes",             "인용구",                False),
+        ("use_bold",               "볼드 강조",              False),
         ("quote_style",            "인용구 스타일",         False),
         ("use_divider",            "구분선",                False),
         ("text_align",             "본문 정렬",             False),
@@ -2835,6 +2882,7 @@ def _combo_values_for(key):
         "paragraph_style": list(PARAGRAPH_LABELS.values()),
         "line_max_chars": ["20", "25", "30", "35", "40", "50"],
         "use_quotes": list(USE_QUOTES_LABELS.values()),
+        "use_bold": list(USE_BOLD_LABELS.values()),
         "quote_style": list(QUOTE_STYLE_LABELS.values()),
         "use_divider": list(DIVIDER_LABELS.values()),
         "text_align": list(TEXT_ALIGN_LABELS.values()),
@@ -3198,6 +3246,9 @@ class App(tk.Tk):
             elif k == "use_quotes":
                 var.set(USE_QUOTES_LABELS.get(cfg.get(k, "on"),
                                               USE_QUOTES_LABELS["on"]))
+            elif k == "use_bold":
+                var.set(USE_BOLD_LABELS.get(cfg.get(k, "on"),
+                                            USE_BOLD_LABELS["on"]))
             elif k == "quote_style":
                 var.set(QUOTE_STYLE_LABELS.get(cfg.get(k, "line"),
                                                QUOTE_STYLE_LABELS["line"]))
@@ -3238,6 +3289,8 @@ class App(tk.Tk):
                 cfg[k] = TEXT_ALIGN_CODES.get(val, "left")
             elif k == "use_quotes":
                 cfg[k] = USE_QUOTES_CODES.get(val, "on")
+            elif k == "use_bold":
+                cfg[k] = USE_BOLD_CODES.get(val, "on")
             elif k == "quote_style":
                 cfg[k] = QUOTE_STYLE_CODES.get(val, "line")
             elif k == "use_divider":
