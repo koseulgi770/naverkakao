@@ -61,6 +61,14 @@ DEFAULT_CONFIG = {
     "text_align": "left",
     "image_enabled": "on",
     "image_max": 5,
+    "image_full_width": "on",
+    "target_char_count": 0,       # 0 = 미적용(자유)
+    "body_font_size": "",         # "" = 미적용, 아니면 "14".."24" 등
+    "body_line_height": "",       # "" = 미적용, 아니면 "1.6" 등
+    "subtitle_bigger": "on",
+    "repeat_title_quote": "off",
+    "line_break_every_n": "0",    # "0" = 미적용(문장마다 여백)
+    "tone_style": "friendly",     # friendly(해요체) / formal(습니다체)
     "chrome_profile_dir": os.path.join(BASE_DIR, "chrome_profile"),
     "publish_mode": "publish",  # "publish"(발행) / "draft"(임시저장) / "schedule"(예약발행)
     "schedule_time": "",        # 예약발행 시각 (예: 2026-07-15 09:00)
@@ -106,8 +114,37 @@ USE_BOLD_LABELS = {
 }
 USE_BOLD_CODES = {v: k for k, v in USE_BOLD_LABELS.items()}
 
+# 말투
+TONE_STYLE_LABELS = {
+    "friendly": "😊 친근체 (~해요/했어요)",
+    "formal": "🎩 정중체 (~습니다/했습니다)",
+}
+TONE_STYLE_CODES = {v: k for k, v in TONE_STYLE_LABELS.items()}
+
+# 소제목 글자 크게
+SUBTITLE_BIGGER_LABELS = {
+    "on": "🔠 소제목 크게 (본문보다 한 단계 크게)",
+    "off": "🚫 소제목 크기 그대로",
+}
+SUBTITLE_BIGGER_CODES = {v: k for k, v in SUBTITLE_BIGGER_LABELS.items()}
+
+# 제목 반복(본문 시작 직후 인용구로)
+REPEAT_TITLE_QUOTE_LABELS = {
+    "off": "🚫 반복 안 함",
+    "on": "🔁 본문 시작 직후 제목 인용구 반복",
+}
+REPEAT_TITLE_QUOTE_CODES = {v: k for k, v in REPEAT_TITLE_QUOTE_LABELS.items()}
+
+# 이미지 가로 100% 표시
+IMAGE_FULL_WIDTH_LABELS = {
+    "on": "🖼️ 이미지 가로 100% 표시",
+    "off": "🚫 원본 크기 유지",
+}
+IMAGE_FULL_WIDTH_CODES = {v: k for k, v in IMAGE_FULL_WIDTH_LABELS.items()}
+
 # 인용구(소제목) 스타일 — SE 에디터 인용구 팝업의 몇 번째 스타일을 쓸지
 QUOTE_STYLE_LABELS = {
+    "auto": "🔀 자동 (스타일 교대)",
     "line": "▎ 세로줄형",
     "bubble": "💬 말풍선형",
     "corner": "『』 따옴표형",
@@ -115,6 +152,7 @@ QUOTE_STYLE_LABELS = {
 QUOTE_STYLE_CODES = {v: k for k, v in QUOTE_STYLE_LABELS.items()}
 # 스타일 → 인용구 팝업에서 클릭할 버튼 인덱스(0부터)
 QUOTE_STYLE_INDEX = {"line": 0, "bubble": 2, "corner": 1}
+QUOTE_STYLE_AUTO_CYCLE = ["line", "bubble", "corner"]  # '자동'일 때 순서대로 교대
 
 # 구분선 사용 여부
 DIVIDER_LABELS = {
@@ -133,6 +171,7 @@ TEXT_ALIGN_CODES = {v: k for k, v in TEXT_ALIGN_LABELS.items()}
 # 문단 나누기
 PARAGRAPH_LABELS = {
     "para": "📑 문단 단위 (문장 유지 + 문단 사이 여백)",
+    "sentence": "✂️ 1문장 = 1문단 (문장 끝마다 나눔)",
     "airy": "✍️ 짧은 줄 + 여백 (모바일 가독성)",
     "none": "📄 그대로",
 }
@@ -189,8 +228,10 @@ def _split_long_line(text: str, max_len: int = 40) -> list[str]:
             out.append(cur)
     return out
 
-def airy_format(text: str, max_len: int = 30) -> str:
-    """블로그 가독성용: 문장을 짧은 줄로 나누고 줄 사이에 여백을 넣는다."""
+def airy_format(text: str, max_len: int = 30, group_every: int = 0) -> str:
+    """블로그 가독성용: 문장을 짧은 줄로 나누고 줄 사이에 여백을 넣는다.
+    group_every > 0 이면 그만큼의 일반 문장 줄마다 한 번씩만 여백을 두고,
+    0이면(기본) 매 줄마다 여백을 둔다."""
     blocks = []
     for raw_line in text.split("\n"):
         line = raw_line.strip()
@@ -200,6 +241,41 @@ def airy_format(text: str, max_len: int = 30) -> str:
             blocks.append(line)  # 인용구는 자르지 않음
         else:
             blocks.extend(_split_long_line(line, max_len=max_len))
+
+    if group_every <= 0:
+        return "\n\n".join(blocks)
+
+    grouped, buf = [], []
+    for b in blocks:
+        if looks_like_quote(b):
+            if buf:
+                grouped.append("\n".join(buf))
+                buf = []
+            grouped.append(b)
+            continue
+        buf.append(b)
+        if len(buf) >= group_every:
+            grouped.append("\n".join(buf))
+            buf = []
+    if buf:
+        grouped.append("\n".join(buf))
+    return "\n\n".join(grouped)
+
+def sentence_paragraph_format(text: str) -> str:
+    """1문장 = 1문단: 문장 끝(마침표 등) 기준으로 나눠 문장마다 독립된 문단으로 만든다.
+    소제목/인용구 줄은 자르지 않고 그대로 독립 블록으로 유지한다."""
+    blocks = []
+    for raw_line in text.split("\n"):
+        line = raw_line.strip()
+        if not line:
+            continue
+        if looks_like_quote(line):
+            blocks.append(line)
+            continue
+        for sent in re.split(r"(?<=[.!?。！？])\s+", line):
+            sent = sent.strip()
+            if sent:
+                blocks.append(sent)
     return "\n\n".join(blocks)
 
 def prepare_body(cfg: dict, body: str) -> str:
@@ -209,7 +285,11 @@ def prepare_body(cfg: dict, body: str) -> str:
     text = markdown_to_plain(body)
     style = cfg.get("paragraph_style", "para")
     if style == "airy":
-        text = airy_format(text, max_len=_cfg_int(cfg, "line_max_chars", 30))
+        group_every = _cfg_int(cfg, "line_break_every_n", 0)
+        text = airy_format(text, max_len=_cfg_int(cfg, "line_max_chars", 30),
+                           group_every=group_every)
+    elif style == "sentence":
+        text = sentence_paragraph_format(text)
     elif style == "para":
         text = para_format(text)
     if cfg.get("use_bold", "on") == "off":
@@ -507,6 +587,19 @@ def ai_rewrite(cfg: dict, title: str, body: str, log) -> tuple[str, str]:
     prompt_tmpl = cfg.get("ai_prompt", "").strip() or DEFAULT_REWRITE_PROMPT
     if "{content}" not in prompt_tmpl:
         prompt_tmpl += "\n\n원문:\n{content}"
+
+    extra_rules = []
+    target_chars = _cfg_int(cfg, "target_char_count", 0)
+    if target_chars > 0:
+        extra_rules.append(f"- 본문 전체 글자수는 {target_chars}자 내외로 맞춰줘")
+    if cfg.get("tone_style", "friendly") == "formal":
+        extra_rules.append("- 말투는 정중한 '~습니다/했습니다'체로 통일해줘")
+    else:
+        extra_rules.append("- 말투는 친근한 '~해요/했어요'체로 통일해줘")
+    if extra_rules:
+        prompt_tmpl = prompt_tmpl.replace(
+            "{content}", "\n".join(extra_rules) + "\n\n원문:\n{content}")
+
     source = f"제목: {title}\n\n{body}" if title else body
     prompt = prompt_tmpl.replace("{content}", source[:12000])
 
@@ -870,6 +963,48 @@ def select_naver_category(driver, category: str) -> bool:
             except Exception:
                 continue
     return False
+
+def apply_body_style_extras(driver, cfg, log):
+    """글씨 크기 / 줄 높이 / 소제목 글자 크게 / 이미지 가로 100%를 JS로 일괄 적용한다."""
+    font_size = (cfg.get("body_font_size") or "").strip()
+    line_height = (cfg.get("body_line_height") or "").strip()
+    subtitle_bigger = cfg.get("subtitle_bigger", "on") == "on"
+    image_full = cfg.get("image_full_width", "on") == "on"
+
+    if not (font_size or line_height or subtitle_bigger or image_full):
+        return
+    try:
+        driver.execute_script("""
+            const [fontSize, lineHeight, subtitleBigger, imageFull] = arguments;
+            if (fontSize || lineHeight) {
+                document.querySelectorAll('.se-text-paragraph, .se-component-content p')
+                    .forEach(el => {
+                        if (fontSize) el.style.fontSize = fontSize + 'px';
+                        if (lineHeight) el.style.lineHeight = lineHeight;
+                    });
+            }
+            if (subtitleBigger) {
+                document.querySelectorAll('.se-quotation, [class*="quotation"]')
+                    .forEach(el => {
+                        const base = fontSize ? parseFloat(fontSize) : 16;
+                        el.style.fontSize = Math.round(base * 1.15) + 'px';
+                        el.style.fontWeight = 'bold';
+                    });
+            }
+            if (imageFull) {
+                document.querySelectorAll('.se-image img, .se-component-content img')
+                    .forEach(el => { el.style.width = '100%'; el.style.height = 'auto'; });
+            }
+        """, font_size, line_height, subtitle_bigger, image_full)
+        applied = []
+        if font_size: applied.append(f"글씨크기 {font_size}px")
+        if line_height: applied.append(f"줄높이 {line_height}")
+        if subtitle_bigger: applied.append("소제목 크게")
+        if image_full: applied.append("이미지 가로100%")
+        if applied:
+            log("🎨 스타일 적용: " + ", ".join(applied))
+    except Exception as e:
+        log(f"⚠️ 본문 스타일 적용 실패(계속 진행): {e}")
 
 def apply_alignment(driver, alignment: str) -> bool:
     """본문 전체 선택 후 정렬을 적용한다 (툴바 버튼 + JS 폴백)."""
@@ -1430,12 +1565,30 @@ def post_to_naver_blog(browser: Browser, cfg: dict, title: str, content: str,
     use_divider = (cfg.get("transform_mode") != "raw"
                    and cfg.get("use_divider", "on") != "off")
     wrote_any = False
+    quote_counter = 0
+
+    def _next_quote_style() -> str:
+        nonlocal quote_counter
+        if quote_style != "auto":
+            return quote_style
+        s2 = QUOTE_STYLE_AUTO_CYCLE[quote_counter % len(QUOTE_STYLE_AUTO_CYCLE)]
+        quote_counter += 1
+        return s2
 
     # 본문 맨 앞(제목 아래) 구분선
     if use_divider:
         try:
             insert_naver_divider(driver)
             _focus_body()
+        except Exception:
+            pass
+
+    # 본문 시작 직후 제목을 인용구로 한 번 더 강조
+    if cfg.get("repeat_title_quote") == "on" and title:
+        try:
+            insert_quote_block(driver, title, style=_next_quote_style())
+            _focus_body()
+            wrote_any = True
         except Exception:
             pass
 
@@ -1457,7 +1610,7 @@ def post_to_naver_blog(browser: Browser, cfg: dict, title: str, content: str,
                     if use_divider:
                         insert_naver_divider(driver)   # 소제목 앞 구분선
                         _focus_body()
-                    insert_quote_block(driver, subtitle, style=quote_style)
+                    insert_quote_block(driver, subtitle, style=_next_quote_style())
                     _focus_body()          # ★ 인용구 뒤 본문 영역 재클릭
                     wrote_any = True
                     continue
@@ -1508,6 +1661,9 @@ def post_to_naver_blog(browser: Browser, cfg: dict, title: str, content: str,
             log(f"📐 {TEXT_ALIGN_LABELS.get(align, align)} 적용")
         except Exception as e:
             log(f"⚠️ 정렬 적용 실패(계속 진행): {e}")
+
+    # 글씨 크기/줄 높이/소제목 크게/이미지 가로 100%
+    apply_body_style_extras(driver, cfg, log)
 
     # 카테고리 선택
     category = (cfg.get("naver_category") or "").strip()
@@ -2845,13 +3001,21 @@ STEP_FIELDS = {
         ("gpt_model",              "GPT 모델",              False),
         ("gemini_key",             "Gemini API Key",        True),
         ("gemini_model",           "Gemini 모델",           False),
+        ("target_char_count",      "본문 글자수 목표 (0=자유)", False),
+        ("tone_style",             "말투",                  False),
         ("paragraph_style",        "문단 나누기",           False),
         ("line_max_chars",         "한 줄 글자 수 (줄바꿈 기준)", False),
+        ("line_break_every_n",     "줄바꿈 간격 (몇 문장마다 여백)", False),
         ("use_quotes",             "인용구",                False),
         ("use_bold",               "볼드 강조",              False),
         ("quote_style",            "인용구 스타일",         False),
+        ("subtitle_bigger",        "소제목 글자 크기",       False),
+        ("repeat_title_quote",     "제목 반복",             False),
         ("use_divider",            "구분선",                False),
         ("text_align",             "본문 정렬",             False),
+        ("body_font_size",         "글씨 크기 (px, 비우면 기본)", False),
+        ("body_line_height",       "줄 높이 (예: 1.8, 비우면 기본)", False),
+        ("image_full_width",       "이미지 표시 크기",       False),
     ],
     "login": [
         ("naver_id",               "네이버 ID (자동 로그인용)", False),
@@ -2889,6 +3053,14 @@ def _combo_values_for(key):
         "lilys_summary_length": SUMMARY_LENGTHS,
         "image_enabled": list(IMAGE_ENABLED_LABELS.values()),
         "image_max": ["3", "5", "8", "10"],
+        "target_char_count": ["0", "1500", "2000", "2500", "3000"],
+        "tone_style": list(TONE_STYLE_LABELS.values()),
+        "line_break_every_n": ["0", "2", "3", "4"],
+        "subtitle_bigger": list(SUBTITLE_BIGGER_LABELS.values()),
+        "repeat_title_quote": list(REPEAT_TITLE_QUOTE_LABELS.values()),
+        "body_font_size": ["", "14", "15", "16", "17", "19", "24"],
+        "body_line_height": ["", "1.4", "1.6", "1.8", "2.0"],
+        "image_full_width": list(IMAGE_FULL_WIDTH_LABELS.values()),
         "browser_engine": list(BROWSER_ENGINE_LABELS.values()),
         "watch_mode": list(WATCH_MODE_LABELS.values()),
         "auto_start_watch": list(WATCH_AUTOSTART_LABELS.values()),
@@ -3009,10 +3181,32 @@ class App(tk.Tk):
         self._cfg_vars = {}
         self._yt_var = tk.StringVar()
 
-        # 단계별 설정 페이지를 한 자리(카드)에 겹쳐두고 하나만 보여준다
-        card = tk.Frame(self, bg=SURFACE, height=480)
-        card.pack(fill="x", padx=24, pady=4)
-        card.pack_propagate(False)
+        # 단계별 설정 페이지를 한 자리(카드)에 겹쳐두고 하나만 보여준다.
+        # 설정 항목이 많아져 세로 스크롤이 가능한 캔버스로 감싼다.
+        card_outer = tk.Frame(self, bg=SURFACE, height=420)
+        card_outer.pack(fill="x", padx=24, pady=4)
+        card_outer.pack_propagate(False)
+        card_canvas = tk.Canvas(card_outer, bg=SURFACE, highlightthickness=0)
+        card_scroll = ttk.Scrollbar(card_outer, orient="vertical",
+                                    command=card_canvas.yview)
+        card = tk.Frame(card_canvas, bg=SURFACE)
+        card_win = card_canvas.create_window((0, 0), window=card, anchor="nw")
+        card_canvas.configure(yscrollcommand=card_scroll.set)
+        card_canvas.pack(side="left", fill="both", expand=True)
+        card_scroll.pack(side="right", fill="y")
+
+        def _on_card_configure(_e=None):
+            card_canvas.configure(scrollregion=card_canvas.bbox("all"))
+        card.bind("<Configure>", _on_card_configure)
+        card_canvas.bind("<Configure>",
+                         lambda e: card_canvas.itemconfig(card_win, width=e.width))
+
+        def _on_mousewheel(event):
+            card_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        card_canvas.bind("<Enter>",
+                         lambda e: card_canvas.bind_all("<MouseWheel>", _on_mousewheel))
+        card_canvas.bind("<Leave>",
+                         lambda e: card_canvas.unbind_all("<MouseWheel>"))
         self._pages = {}
 
         def _build_field(parent, key, label, secret, row):
@@ -3249,6 +3443,18 @@ class App(tk.Tk):
             elif k == "use_bold":
                 var.set(USE_BOLD_LABELS.get(cfg.get(k, "on"),
                                             USE_BOLD_LABELS["on"]))
+            elif k == "tone_style":
+                var.set(TONE_STYLE_LABELS.get(cfg.get(k, "friendly"),
+                                              TONE_STYLE_LABELS["friendly"]))
+            elif k == "subtitle_bigger":
+                var.set(SUBTITLE_BIGGER_LABELS.get(cfg.get(k, "on"),
+                                                   SUBTITLE_BIGGER_LABELS["on"]))
+            elif k == "repeat_title_quote":
+                var.set(REPEAT_TITLE_QUOTE_LABELS.get(cfg.get(k, "off"),
+                                                      REPEAT_TITLE_QUOTE_LABELS["off"]))
+            elif k == "image_full_width":
+                var.set(IMAGE_FULL_WIDTH_LABELS.get(cfg.get(k, "on"),
+                                                    IMAGE_FULL_WIDTH_LABELS["on"]))
             elif k == "quote_style":
                 var.set(QUOTE_STYLE_LABELS.get(cfg.get(k, "line"),
                                                QUOTE_STYLE_LABELS["line"]))
@@ -3291,6 +3497,14 @@ class App(tk.Tk):
                 cfg[k] = USE_QUOTES_CODES.get(val, "on")
             elif k == "use_bold":
                 cfg[k] = USE_BOLD_CODES.get(val, "on")
+            elif k == "tone_style":
+                cfg[k] = TONE_STYLE_CODES.get(val, "friendly")
+            elif k == "subtitle_bigger":
+                cfg[k] = SUBTITLE_BIGGER_CODES.get(val, "on")
+            elif k == "repeat_title_quote":
+                cfg[k] = REPEAT_TITLE_QUOTE_CODES.get(val, "off")
+            elif k == "image_full_width":
+                cfg[k] = IMAGE_FULL_WIDTH_CODES.get(val, "on")
             elif k == "quote_style":
                 cfg[k] = QUOTE_STYLE_CODES.get(val, "line")
             elif k == "use_divider":
